@@ -1,6 +1,6 @@
 import express from 'express';
 import http from 'http';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -16,6 +16,7 @@ const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_PRESET_NAME_LENGTH = 32;
 const MIN_SCREEN_COUNT = 2;
 const MAX_SCREEN_COUNT = 12;
+const PAIRING_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_PRESET_NAME = 'Default';
 const DISPLAY_STATES = new Set(['waiting', 'loading', 'ready', 'error']);
 const IMAGE_FORMATS = new Map([
@@ -24,14 +25,16 @@ const IMAGE_FORMATS = new Map([
     ['image/webp', { extension: 'webp', sharpFormat: 'webp' }]
 ]);
 
+function isPrivateIPv4(address) {
+    return /^10\./.test(address)
+        || /^192\.168\./.test(address)
+        || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
+}
+
 function getPrivateLanAddress() {
     const interfaces = Object.entries(networkInterfaces());
     const isVirtualInterface = (name) =>
         /virtual|vmware|virtualbox|docker|wsl|hyper-v|vethernet|loopback|bluetooth/i.test(name);
-    const isPrivateIPv4 = (address) =>
-        /^10\./.test(address)
-        || /^192\.168\./.test(address)
-        || /^172\.(1[6-9]|2\d|3[01])\./.test(address);
     const candidates = interfaces
         .filter(([name]) => !isVirtualInterface(name))
         .sort(([left], [right]) => {
@@ -52,6 +55,8 @@ function getPrivateLanAddress() {
 
 export function createParallaxServer({
     reservationMs = 30_000,
+    pairingTtlMs = PAIRING_TTL_MS,
+    pairingInterfaces = null,
     publicBaseUrl = process.env.PARALLAX_PUBLIC_URL,
     uploadDirectory = fileURLToPath(new URL('./uploads/', import.meta.url)),
     calibrationFile = fileURLToPath(new URL('./data/calibration.json', import.meta.url))
@@ -66,6 +71,8 @@ export function createParallaxServer({
     });
     const devices = new Map();
     const controllers = new Set();
+    const pairingSessions = new Map();
+    const pairingTimers = new Map();
     const deviceRoom = 'parallax:devices';
     const upload = multer({
         storage: multer.memoryStorage(),
@@ -490,6 +497,37 @@ export function createParallaxServer({
         target.emit('devices:update', getDeviceSnapshot());
     }
 
+    function getLanInterfaces() {
+        if (Array.isArray(pairingInterfaces)) {
+            return pairingInterfaces.filter((entry) =>
+                entry && typeof entry.name === 'string'
+                && typeof entry.address === 'string'
+                && isPrivateIPv4(entry.address));
+        }
+        const interfaces = Object.entries(networkInterfaces());
+        const isVirtualInterface = (name) =>
+            /virtual|vmware|virtualbox|docker|wsl|hyper-v|vethernet|loopback|bluetooth/i.test(name);
+
+        return interfaces
+            .filter(([name]) => !isVirtualInterface(name))
+            .flatMap(([name, addresses]) => (addresses ?? [])
+                .filter((entry) => entry.family === 'IPv4'
+                    && !entry.internal
+                    && isPrivateIPv4(entry.address))
+                .map((entry) => ({ name, address: entry.address })))
+            .filter((entry, index, list) =>
+                list.findIndex((candidate) => candidate.address === entry.address) === index);
+    }
+
+    function clearPairingSession(token) {
+        const timer = pairingTimers.get(token);
+        if (timer) {
+            clearTimeout(timer);
+            pairingTimers.delete(token);
+        }
+        pairingSessions.delete(token);
+    }
+
     app.use('/uploads', express.static(uploadDirectory, {
         dotfiles: 'deny',
         index: false,
@@ -659,6 +697,104 @@ export function createParallaxServer({
         console.log(`Socket connected: ${socket.id} (${socket.conn.transport.name})`);
         broadcastDeviceSnapshot(socket);
 
+        socket.on('pairing:create', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function'
+                ? acknowledge
+                : typeof request === 'function' ? request : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Only a registered controller can create a pairing session.' });
+                return;
+            }
+
+            const interfaces = getLanInterfaces();
+            if (interfaces.length === 0) {
+                respond({
+                    ok: false,
+                    message: 'No private IPv4 LAN address was found. Connect this laptop to the phone network and retry.'
+                });
+                return;
+            }
+
+            for (const [existingToken, session] of pairingSessions) {
+                if (session.expiresAt <= Date.now() || session.controllerId === socket.id) {
+                    clearPairingSession(existingToken);
+                }
+            }
+            const token = randomBytes(32).toString('base64url');
+            const expiresAt = Date.now() + pairingTtlMs;
+            pairingSessions.set(token, {
+                expiresAt,
+                used: false,
+                controllerId: socket.id
+            });
+            const timer = setTimeout(() => {
+                const activeSession = pairingSessions.get(token);
+                if (!activeSession) {
+                    return;
+                }
+                activeSession.expired = true;
+                pairingTimers.delete(token);
+                io.sockets.sockets.get(socket.id)?.emit('pairing:expired', { expiresAt });
+                const cleanupTimer = setTimeout(() => clearPairingSession(token), pairingTtlMs);
+                cleanupTimer.unref?.();
+                pairingTimers.set(token, cleanupTimer);
+            }, pairingTtlMs);
+            timer.unref?.();
+            pairingTimers.set(token, timer);
+            const result = {
+                ok: true,
+                token,
+                expiresAt,
+                interfaces,
+                connectedDevices: [...devices.values()]
+                    .filter(({ socketId }) => socketId !== null).length
+            };
+            socket.emit('pairing:created', result);
+            respond(result);
+        });
+
+        socket.on('pairing:join', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = request?.token;
+            if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{40,64}$/.test(token)) {
+                const result = { ok: false, message: 'Invalid pairing link. Request a new QR code.' };
+                socket.emit('pairing:result', result);
+                respond(result);
+                return;
+            }
+
+            const session = pairingSessions.get(token);
+            if (!session) {
+                const result = { ok: false, message: 'This pairing link is invalid or has expired.' };
+                socket.emit('pairing:result', result);
+                respond(result);
+                return;
+            }
+            if (session.expiresAt <= Date.now()) {
+                clearPairingSession(token);
+                const result = { ok: false, expired: true, message: 'This pairing code expired. Ask the controller for a new one.' };
+                socket.emit('pairing:expired', result);
+                socket.emit('pairing:result', result);
+                respond(result);
+                return;
+            }
+            if (session.used) {
+                const result = { ok: false, message: 'This pairing code has already been used. Ask the controller for a new one.' };
+                socket.emit('pairing:result', result);
+                respond(result);
+                return;
+            }
+
+            session.used = true;
+            socket.data.parallaxPairingAuthorized = true;
+            socket.emit('pairing:result', { ok: true });
+            io.sockets.sockets.get(session.controllerId)?.emit('pairing:device-joined', {
+                connectedDevices: [...devices.values()]
+                    .filter(({ socketId }) => socketId !== null).length
+            });
+            respond({ ok: true });
+        });
+
         socket.on('device:register', async (deviceId) => {
             if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
                 console.warn(`Device registration rejected for socket ${socket.id}: invalid device ID`);
@@ -774,6 +910,13 @@ export function createParallaxServer({
         });
 
         socket.on('controller:register', () => {
+            if (socket.data.parallaxPairingAuthorized
+                || [...devices.values()].some((device) => device.socketId === socket.id)) {
+                socket.emit('controller:rejected', {
+                    message: 'Display devices cannot register as controllers.'
+                });
+                return;
+            }
             controllers.add(socket.id);
             socket.emit('content:current', currentContent);
             socket.emit('calibration:current', {
@@ -1219,6 +1362,11 @@ export function createParallaxServer({
                 clearTimeout(device.disconnectTimer);
             }
         }
+        for (const timer of pairingTimers.values()) {
+            clearTimeout(timer);
+        }
+        pairingTimers.clear();
+        pairingSessions.clear();
 
         await new Promise((resolveClose) => io.close(resolveClose));
     }

@@ -1,5 +1,6 @@
 import { createParallaxSocket, getParallaxServerBaseUrl } from '../core/socket.js';
 import { formatAlignmentValue, getAlignmentStep } from './alignment-controls.js';
+import QRCode from 'qrcode';
 import './controller.css';
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
@@ -86,6 +87,9 @@ export function mountController() {
                             </div>
                             <span class="device-count" data-device-count>0 <small>of 2</small></span>
                         </div>
+                        <button class="alignment-action add-device-button" type="button" data-add-device disabled>
+                            Add Device
+                        </button>
                         <div class="screen-config-controls">
                             <label>Screen count
                                 <select data-screen-count disabled>
@@ -202,6 +206,43 @@ export function mountController() {
                 <div class="diagnostics-grid" data-diagnostics-screens></div>
             </section>
 
+            <dialog class="pairing-dialog" data-pairing-dialog aria-labelledby="pairing-title">
+                <div class="pairing-dialog-heading">
+                    <div>
+                        <p class="eyebrow">DEVICE ONBOARDING</p>
+                        <h2 id="pairing-title">Add a display device</h2>
+                    </div>
+                    <button class="pairing-close" type="button" data-pairing-close aria-label="Close dialog">×</button>
+                </div>
+                <p class="card-description">Connect your phone to the same Wi-Fi network, then scan this QR code.</p>
+                <label class="pairing-interface" data-pairing-interface-wrap hidden>
+                    Network interface
+                    <select data-pairing-interface></select>
+                </label>
+                <div class="pairing-qr-wrap">
+                    <img data-pairing-qr alt="QR code for connecting a display device" hidden>
+                    <p data-pairing-placeholder>Requesting a secure pairing code...</p>
+                </div>
+                <label class="pairing-url-label">
+                    Display URL
+                    <input type="text" data-pairing-url readonly>
+                </label>
+                <div class="pairing-actions">
+                    <button class="alignment-action" type="button" data-pairing-copy disabled>Copy URL</button>
+                    <button class="alignment-action" type="button" data-pairing-refresh>Refresh QR</button>
+                </div>
+                <div class="pairing-status" role="status" aria-live="polite">
+                    <p data-pairing-status>Preparing pairing session...</p>
+                    <p>Code expires in <strong data-pairing-countdown>--:--</strong></p>
+                    <p>Connected devices: <strong data-pairing-device-count>0</strong></p>
+                </div>
+                <ol class="pairing-instructions">
+                    <li>Scan with the phone camera.</li>
+                    <li>Open the display link and wait for device registration.</li>
+                    <li>Assign a screen here if manual assignment is enabled.</li>
+                </ol>
+            </dialog>
+
             <footer class="controller-footer">
                 <span>PARALLAX · Synchronized panoramic display</span>
                 <span>Images are limited to 15 MB</span>
@@ -235,6 +276,19 @@ export function mountController() {
     const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
     const assignmentStatus = root.querySelector('[data-assignment-status]');
     const diagnosticsScreens = root.querySelector('[data-diagnostics-screens]');
+    const addDeviceButton = root.querySelector('[data-add-device]');
+    const pairingDialog = root.querySelector('[data-pairing-dialog]');
+    const pairingCloseButton = root.querySelector('[data-pairing-close]');
+    const pairingInterfaceWrap = root.querySelector('[data-pairing-interface-wrap]');
+    const pairingInterfaceSelect = root.querySelector('[data-pairing-interface]');
+    const pairingQr = root.querySelector('[data-pairing-qr]');
+    const pairingPlaceholder = root.querySelector('[data-pairing-placeholder]');
+    const pairingUrlInput = root.querySelector('[data-pairing-url]');
+    const pairingStatus = root.querySelector('[data-pairing-status]');
+    const pairingCountdown = root.querySelector('[data-pairing-countdown]');
+    const pairingDeviceCount = root.querySelector('[data-pairing-device-count]');
+    const pairingCopyButton = root.querySelector('[data-pairing-copy]');
+    const pairingRefreshButton = root.querySelector('[data-pairing-refresh]');
     const socket = createParallaxSocket();
 
     let selectedFile = null;
@@ -244,6 +298,9 @@ export function mountController() {
     let totalScreens = 2;
     let assignmentMode = 'automatic';
     let registeredDevices = [];
+    let pairingSession = null;
+    let pairingCountdownTimer = null;
+    let knownDeviceIds = null;
     const alignmentByScreen = Object.fromEntries(
         Array.from({ length: 12 }, (_, index) => [
             index + 1,
@@ -466,6 +523,129 @@ export function mountController() {
 
     updateCalibrationUI();
 
+    function setPairingStatus(message, isError = false) {
+        pairingStatus.textContent = message;
+        pairingStatus.classList.toggle('is-error', isError);
+    }
+
+    function updatePairingCountdown() {
+        if (!pairingSession) {
+            pairingCountdown.textContent = '--:--';
+            return;
+        }
+        const remaining = Math.max(0, pairingSession.expiresAt - Date.now());
+        const minutes = Math.floor(remaining / 60_000);
+        const seconds = Math.floor((remaining % 60_000) / 1000);
+        pairingCountdown.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        if (remaining === 0) {
+            pairingQr.hidden = true;
+            pairingCopyButton.disabled = true;
+            setPairingStatus('Pairing code expired. Refresh the QR code to try again.', true);
+            clearInterval(pairingCountdownTimer);
+            pairingCountdownTimer = null;
+        }
+    }
+
+    function renderPairingQr() {
+        if (!pairingSession?.token) {
+            return;
+        }
+        const selectedAddress = pairingInterfaceSelect.value;
+        if (!selectedAddress) {
+            setPairingStatus('No usable LAN address is available. Connect to Wi-Fi and refresh.', true);
+            return;
+        }
+
+        const url = new URL('/', window.location.origin);
+        url.hostname = selectedAddress;
+        url.searchParams.set('pair', pairingSession.token);
+        pairingUrlInput.value = url.toString();
+        pairingPlaceholder.textContent = 'Generating QR code...';
+        pairingQr.hidden = true;
+        QRCode.toDataURL(url.toString(), {
+            errorCorrectionLevel: 'M',
+            margin: 2,
+            width: 280
+        }).then((dataUrl) => {
+            if (pairingSession?.token !== url.searchParams.get('pair')) {
+                return;
+            }
+            pairingQr.src = dataUrl;
+            pairingQr.hidden = false;
+            pairingPlaceholder.hidden = true;
+            pairingCopyButton.disabled = false;
+            setPairingStatus(`Ready to scan. Use ${selectedAddress} on the phone's Wi-Fi network.`);
+        }).catch((error) => {
+            console.error('Unable to generate pairing QR code:', error);
+            pairingPlaceholder.hidden = false;
+            pairingPlaceholder.textContent = 'Could not generate the QR code. Copy the URL or refresh to retry.';
+            setPairingStatus('QR generation failed. Please try again.', true);
+        });
+    }
+
+    function createPairingSession() {
+        pairingRefreshButton.disabled = true;
+        pairingCopyButton.disabled = true;
+        pairingQr.hidden = true;
+        pairingPlaceholder.hidden = false;
+        pairingPlaceholder.textContent = 'Requesting a secure pairing code...';
+        pairingUrlInput.value = '';
+        setPairingStatus('Preparing pairing session...');
+        if (!socket.connected) {
+            pairingRefreshButton.disabled = false;
+            setPairingStatus('Backend is disconnected. Reconnect and try again.', true);
+            return;
+        }
+        socket.timeout(5000).emit('pairing:create', (error, result) => {
+            pairingRefreshButton.disabled = false;
+            if (error || !result?.ok) {
+                pairingPlaceholder.textContent = 'A pairing QR code is not available.';
+                setPairingStatus(error
+                    ? 'Could not reach the backend. Check the network and try again.'
+                    : result?.message || 'Unable to create pairing code.', true);
+                return;
+            }
+            pairingSession = result;
+            pairingDeviceCount.textContent = String(result.connectedDevices ?? 0);
+            pairingInterfaceSelect.replaceChildren();
+            for (const networkInterface of result.interfaces) {
+                const option = document.createElement('option');
+                option.value = networkInterface.address;
+                option.textContent = `${networkInterface.name} · ${networkInterface.address}`;
+                pairingInterfaceSelect.append(option);
+            }
+            pairingInterfaceWrap.hidden = result.interfaces.length < 2;
+            renderPairingQr();
+            clearInterval(pairingCountdownTimer);
+            pairingCountdownTimer = setInterval(updatePairingCountdown, 1000);
+            updatePairingCountdown();
+        });
+    }
+
+    addDeviceButton.addEventListener('click', () => {
+        if (!pairingDialog.open) {
+            pairingDialog.showModal();
+        }
+        createPairingSession();
+    });
+    pairingRefreshButton.addEventListener('click', createPairingSession);
+    pairingInterfaceSelect.addEventListener('change', renderPairingQr);
+    pairingCopyButton.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(pairingUrlInput.value);
+            setPairingStatus('Display URL copied to clipboard.');
+        } catch (error) {
+            console.error('Unable to copy the display URL:', error);
+            setPairingStatus('Could not access the clipboard. Select and copy the URL manually.', true);
+        }
+    });
+    pairingCloseButton.addEventListener('click', () => pairingDialog.close());
+    pairingDialog.addEventListener('click', (event) => {
+        if (event.target === pairingDialog) {
+            pairingDialog.close();
+        }
+    });
+
     calibrationButton?.addEventListener('click', () => {
         calibrationButton.disabled = true;
         emitControllerCommand('calibration:set', { enabled: !calibrationEnabled }, (response) => {
@@ -655,10 +835,24 @@ export function mountController() {
     function setDevices(devices) {
         markServerCommunication();
         registeredDevices = Array.isArray(devices) ? devices : [];
+        const connectedDevices = registeredDevices.filter((device) => device.connected);
+        const connectedIds = new Set(connectedDevices.map((device) => device.id));
+        if (knownDeviceIds !== null) {
+            const newlyConnected = connectedDevices.find((device) => !knownDeviceIds.has(device.id));
+            if (newlyConnected) {
+                assignmentStatus.textContent = `New phone connected: ${newlyConnected.id}. Assign it a screen below.`;
+                assignmentStatus.classList.remove('is-error');
+                if (pairingDialog.open) {
+                    setPairingStatus(`Phone connected: ${newlyConnected.id}. Assign its screen below.`);
+                }
+            }
+        }
+        knownDeviceIds = connectedIds;
         const devicesByScreen = new Map(registeredDevices
             .filter((device) => Number.isInteger(device.screen))
             .map((device) => [device.screen, device]));
-        const count = registeredDevices.filter((device) => device.connected).length;
+        const count = connectedDevices.length;
+        pairingDeviceCount.textContent = String(count);
         root.querySelector('[data-device-count]').innerHTML = `${count} <small>of ${totalScreens}</small>`;
         root.querySelector('[data-network-note]').textContent = count === totalScreens
             ? `All ${totalScreens} displays are connected and ready.`
@@ -924,6 +1118,7 @@ export function mountController() {
         screenConfigSaveButton.disabled = false;
         assignmentModeSelect.disabled = false;
         screenCountSelect.disabled = false;
+        addDeviceButton.disabled = false;
         setDevices(registeredDevices);
         socket.emit('controller:register');
     });
@@ -939,6 +1134,10 @@ export function mountController() {
         screenConfigSaveButton.disabled = true;
         assignmentModeSelect.disabled = true;
         screenCountSelect.disabled = true;
+        addDeviceButton.disabled = true;
+        if (pairingDialog.open) {
+            setPairingStatus('Backend disconnected. The pairing session may have expired.', true);
+        }
         setDevices(registeredDevices);
         root.querySelector('[data-controller-connection]').classList.remove('is-online');
         root.querySelector('[data-controller-connection-label]').textContent = 'Reconnecting to display system';
@@ -961,6 +1160,16 @@ export function mountController() {
     });
     socket.on('devices:update', setDevices);
     socket.on('diagnostics:update', setDiagnostics);
+    socket.on('pairing:expired', (event) => {
+        if (pairingSession?.expiresAt === event?.expiresAt) {
+            pairingQr.hidden = true;
+            pairingCopyButton.disabled = true;
+            setPairingStatus('Pairing code expired. Refresh the QR code to try again.', true);
+        }
+    });
+    socket.on('pairing:device-joined', () => {
+        setPairingStatus('A phone scanned the code. Waiting for its device registration...');
+    });
     socket.on('screen-config:current', applyScreenConfiguration);
     socket.on('screen-config:update', applyScreenConfiguration);
     socket.on('presets:current', (state) => {
@@ -1029,5 +1238,6 @@ export function mountController() {
         if (previewUrl) {
             URL.revokeObjectURL(previewUrl);
         }
+        clearInterval(pairingCountdownTimer);
     }, { once: true });
 }

@@ -845,3 +845,142 @@ body.controller-page #app {
     color: #d7c8f5;
     font-size: 12px;
 }
+
+.add-device-button {
+    width: 100%;
+    margin-top: 14px;
+}
+
+.pairing-dialog {
+    width: min(520px, calc(100% - 28px));
+    max-height: min(90dvh, 820px);
+    margin: auto;
+    padding: 22px;
+    overflow-y: auto;
+    border: 1px solid #393244;
+    border-radius: 14px;
+    background: #14131a;
+    color: #f4f2f8;
+    box-shadow: 0 24px 80px #00000099;
+}
+
+.pairing-dialog::backdrop {
+    background: #050408c9;
+    backdrop-filter: blur(4px);
+}
+
+.pairing-dialog-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.pairing-dialog-heading h2 {
+    margin-top: 7px;
+    font-size: 19px;
+}
+
+.pairing-close {
+    width: 34px;
+    height: 34px;
+    border: 1px solid #393244;
+    border-radius: 8px;
+    background: transparent;
+    color: #d7c8f5;
+    font-size: 23px;
+    cursor: pointer;
+}
+
+.pairing-interface,
+.pairing-url-label {
+    display: grid;
+    gap: 7px;
+    margin-top: 14px;
+    color: #c7c3cf;
+    font-size: 11px;
+}
+
+.pairing-interface select,
+.pairing-url-label input {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 10px;
+    border: 1px solid #393244;
+    border-radius: 7px;
+    background: #19181f;
+    color: #f4f2f8;
+    font: inherit;
+}
+
+.pairing-qr-wrap {
+    display: grid;
+    min-height: 220px;
+    margin-top: 16px;
+    padding: 12px;
+    place-items: center;
+    border: 1px solid #2a2731;
+    border-radius: 10px;
+    background: #fff;
+    color: #24212b;
+    text-align: center;
+}
+
+.pairing-qr-wrap img {
+    width: min(280px, 100%);
+    height: auto;
+    image-rendering: pixelated;
+}
+
+.pairing-qr-wrap p {
+    padding: 16px;
+    font-size: 12px;
+}
+
+.pairing-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 10px;
+}
+
+.pairing-status,
+.pairing-instructions {
+    margin-top: 14px;
+    color: #aaa6b4;
+    font-size: 11px;
+    line-height: 1.6;
+}
+
+.pairing-status {
+    display: grid;
+    gap: 4px;
+    padding: 10px;
+    border: 1px solid #2a2731;
+    border-radius: 8px;
+    background: #19181f;
+}
+
+.pairing-status strong {
+    color: #f4f2f8;
+}
+
+.pairing-status .is-error,
+.pairing-status p.is-error {
+    color: #fda4af;
+}
+
+.pairing-instructions {
+    padding-left: 20px;
+}
+
+@media (max-width: 520px) {
+    .pairing-dialog {
+        padding: 16px;
+    }
+
+    .pairing-actions > button {
+        flex: 1;
+    }
+}

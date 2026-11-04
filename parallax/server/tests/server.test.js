@@ -532,6 +532,106 @@ test('configures four screens, persists assignments and presets, and restores th
     }
 });
 
+test('pairs display devices with secure, expiring, single-use controller sessions', async () => {
+    const server = await startServer({
+        pairingTtlMs: 500,
+        pairingInterfaces: [
+            { name: 'Wi-Fi', address: '192.168.10.20' },
+            { name: 'Ethernet', address: '10.0.0.8' }
+        ]
+    });
+    const clients = [];
+
+    try {
+        const unauthorizedController = await connectClient(server.url);
+        clients.push(unauthorizedController);
+        const unauthorizedCreate = await emitAck(unauthorizedController, 'pairing:create');
+        assert.equal(unauthorizedCreate.ok, false);
+
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        const createdEvent = nextEvent(controller, 'pairing:created');
+        const created = await emitAck(controller, 'pairing:create');
+        assert.equal(created.ok, true);
+        assert.match(created.token, /^[A-Za-z0-9_-]{40,64}$/);
+        assert.equal(created.expiresAt > Date.now(), true);
+        assert.deepEqual(created.interfaces, [
+            { name: 'Wi-Fi', address: '192.168.10.20' },
+            { name: 'Ethernet', address: '10.0.0.8' }
+        ]);
+        assert.equal((await createdEvent).token, created.token);
+
+        const phone = await connectClient(server.url);
+        clients.push(phone);
+        const joinedEvent = nextEvent(controller, 'pairing:device-joined');
+        const pairingResult = nextEvent(phone, 'pairing:result');
+        assert.deepEqual(await emitAck(phone, 'pairing:join', { token: created.token }), { ok: true });
+        assert.deepEqual(await pairingResult, { ok: true });
+        await joinedEvent;
+
+        const assignment = nextEvent(phone, 'device:assigned');
+        phone.emit('device:register', 'paired-automatic-phone');
+        assert.equal((await assignment).screen, 1);
+        const controllerRejected = nextEvent(phone, 'controller:rejected');
+        phone.emit('controller:register');
+        assert.match((await controllerRejected).message, /cannot register as controllers/);
+        assert.deepEqual(await emitAck(phone, 'calibration:set', { enabled: true }), {
+            ok: false,
+            message: 'Unauthorized calibration request'
+        });
+
+        const reusedPhone = await connectClient(server.url);
+        clients.push(reusedPhone);
+        const reused = await emitAck(reusedPhone, 'pairing:join', { token: created.token });
+        assert.equal(reused.ok, false);
+        assert.match(reused.message, /already been used/);
+
+        const invalid = await emitAck(reusedPhone, 'pairing:join', { token: 'not-a-token' });
+        assert.deepEqual(invalid, {
+            ok: false,
+            message: 'Invalid pairing link. Request a new QR code.'
+        });
+
+        const manualConfig = await emitAck(controller, 'screen-config:set', {
+            totalScreens: 2,
+            assignmentMode: 'manual'
+        });
+        assert.equal(manualConfig.ok, true);
+        const manualPairing = await emitAck(controller, 'pairing:create');
+        const manualPhone = await connectClient(server.url);
+        clients.push(manualPhone);
+        assert.deepEqual(await emitAck(manualPhone, 'pairing:join', {
+            token: manualPairing.token
+        }), { ok: true });
+        const unassigned = nextEvent(manualPhone, 'device:unassigned');
+        manualPhone.emit('device:register', 'paired-manual-phone');
+        assert.equal((await unassigned).screen, null);
+        assert.deepEqual(await emitAck(controller, 'device:assign-screen', {
+            deviceId: 'paired-manual-phone',
+            screen: 2
+        }), { ok: true, deviceId: 'paired-manual-phone', screen: 2 });
+
+        const expiringPairing = await emitAck(controller, 'pairing:create');
+        await new Promise((resolve) => setTimeout(resolve, 550));
+        const expiredPhone = await connectClient(server.url);
+        clients.push(expiredPhone);
+        const expiredEvent = nextEvent(expiredPhone, 'pairing:expired');
+        const expired = await emitAck(expiredPhone, 'pairing:join', {
+            token: expiringPairing.token
+        });
+        assert.equal(expired.ok, false);
+        assert.equal(expired.expired, true);
+        assert.match(expired.message, /expired/);
+        assert.deepEqual(await expiredEvent, expired);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
 test('repairs corrupted calibration settings with safe defaults', async () => {
     const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-corrupt-settings-test-'));
     const calibrationFile = join(testDirectory, 'data', 'calibration.json');

@@ -82,6 +82,8 @@ function startDisplay() {
 
     let latestUpdateId = null;
     let deviceId;
+    const pairingToken = new URLSearchParams(location.search).get('pair');
+    let pairingPending = Boolean(pairingToken);
     try {
         deviceId = getOrCreateDeviceId();
     } catch (error) {
@@ -150,9 +152,32 @@ function startDisplay() {
 
     socket.on('connect', () => {
         showStatus('Connected');
+        if (pairingPending && pairingToken) {
+            showStatus('Validating pairing code');
+            socket.timeout(5000).emit('pairing:join', { token: pairingToken }, (error, result) => {
+                if (error || !result?.ok) {
+                    const message = error
+                        ? 'Could not reach the Parallax server. Check that both devices are on the same Wi-Fi network.'
+                        : result?.message || 'Pairing failed. Ask the controller for a new QR code.';
+                    showStatus(`Pairing error: ${message}`, 'error');
+                    return;
+                }
+                pairingPending = false;
+                const cleanUrl = new URL(location.href);
+                cleanUrl.searchParams.delete('pair');
+                history.replaceState(null, '', `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+                showStatus('Pairing approved');
+                registerDisplayDevice();
+            });
+            return;
+        }
+        registerDisplayDevice();
+    });
+
+    function registerDisplayDevice() {
         showStatus('Registering device');
         socket.emit('device:register', deviceId);
-    });
+    }
 
     socket.on('device:assigned', handleAssignment);
     socket.on('device:assignment-update', handleAssignment);
