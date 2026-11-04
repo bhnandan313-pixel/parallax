@@ -327,6 +327,101 @@ body.controller-page #app {
     color: #4ade80;
 }
 
+.calibration-card,
+.alignment-card {
+    margin-top: 18px;
+}
+
+.card-description {
+    margin-top: 12px;
+    color: #a5a1ad;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.status-badge {
+    padding: 5px 8px;
+    border: 1px solid #393244;
+    border-radius: 999px;
+    color: #aaa6b4;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.alignment-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+}
+
+.alignment-screen {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid #2a2731;
+    border-radius: 10px;
+    background: #19181f;
+}
+
+.alignment-screen-heading,
+.alignment-control > span {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.alignment-screen-heading h3 {
+    font-size: 13px;
+}
+
+.alignment-reset {
+    padding: 6px 10px;
+    border: 1px solid #393244;
+    border-radius: 7px;
+    background: transparent;
+    color: #d7c8f5;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.alignment-reset:disabled {
+    color: #827d89;
+    cursor: not-allowed;
+}
+
+.alignment-control {
+    display: grid;
+    gap: 9px;
+    color: #c7c3cf;
+    font-size: 11px;
+}
+
+.alignment-control output {
+    color: #d7c8f5;
+    font-variant-numeric: tabular-nums;
+}
+
+.alignment-control input {
+    width: 100%;
+    accent-color: #a855f7;
+}
+
+.alignment-control input:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.alignment-status {
+    min-height: 16px;
+    margin-top: 13px;
+    color: #aaa6b4;
+    font-size: 11px;
+}
+
 .controller-side {
     display: grid;
     align-content: start;
@@ -495,6 +590,10 @@ body.controller-page #app {
     }
 
     .controller-side {
+        grid-template-columns: 1fr;
+    }
+
+    .alignment-grid {
         grid-template-columns: 1fr;
     }
 }

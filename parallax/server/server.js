@@ -77,6 +77,37 @@ export function createParallaxServer({
         updateId: 'default-panorama'
     };
     let calibrationEnabled = false;
+    const alignmentSettings = {
+        1: { horizontal: 0, vertical: 0, scale: 1 },
+        2: { horizontal: 0, vertical: 0, scale: 1 }
+    };
+
+    function getAlignmentSnapshot() {
+        return {
+            1: { ...alignmentSettings[1] },
+            2: { ...alignmentSettings[2] }
+        };
+    }
+
+    function validateAlignment(state) {
+        const settings = state?.settings;
+        if (!state || typeof state !== 'object' || Array.isArray(state)
+            || !Number.isInteger(state.screen)
+            || ![1, 2].includes(state.screen)
+            || !settings || typeof settings !== 'object' || Array.isArray(settings)) {
+            return false;
+        }
+
+        return Number.isFinite(settings.horizontal)
+            && settings.horizontal >= -50
+            && settings.horizontal <= 50
+            && Number.isFinite(settings.vertical)
+            && settings.vertical >= -50
+            && settings.vertical <= 50
+            && Number.isFinite(settings.scale)
+            && settings.scale >= 0.95
+            && settings.scale <= 1.05;
+    }
 
     function validateContent(content) {
         if (!content || typeof content !== 'object' || Array.isArray(content)
@@ -327,6 +358,9 @@ export function createParallaxServer({
             socket.emit('calibration:update', {
                 enabled: calibrationEnabled
             });
+            socket.emit('alignment:update', {
+                screens: getAlignmentSnapshot()
+            });
             console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
             broadcastDeviceSnapshot();
         });
@@ -359,6 +393,9 @@ export function createParallaxServer({
             socket.emit('content:current', currentContent);
             socket.emit('calibration:current', {
                 enabled: calibrationEnabled
+            });
+            socket.emit('alignment:current', {
+                screens: getAlignmentSnapshot()
             });
             broadcastDeviceSnapshot(socket);
         });
@@ -393,6 +430,42 @@ export function createParallaxServer({
             respond({
                 ok: true,
                 enabled: calibrationEnabled
+            });
+        });
+
+        socket.on('alignment:set', (state, acknowledge) => {
+            const respond = typeof acknowledge === 'function'
+                ? acknowledge
+                : () => {};
+
+            if (!controllers.has(socket.id)) {
+                respond({
+                    ok: false,
+                    message: 'Unauthorized alignment request'
+                });
+                return;
+            }
+
+            if (!validateAlignment(state)) {
+                respond({
+                    ok: false,
+                    message: 'Invalid alignment settings'
+                });
+                return;
+            }
+
+            alignmentSettings[state.screen] = {
+                horizontal: state.settings.horizontal,
+                vertical: state.settings.vertical,
+                scale: state.settings.scale
+            };
+            const screens = getAlignmentSnapshot();
+
+            io.to(deviceRoom).emit('alignment:update', { screens });
+            respond({
+                ok: true,
+                screen: state.screen,
+                settings: screens[state.screen]
             });
         });
 

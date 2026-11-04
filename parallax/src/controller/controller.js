@@ -137,6 +137,45 @@ export function mountController() {
     </button>
 </section>
 
+            <section class="controller-card alignment-card">
+                <div class="card-heading">
+                    <div>
+                        <p class="eyebrow">PHYSICAL DISPLAY SETUP</p>
+                        <h2>Screen alignment</h2>
+                    </div>
+                </div>
+                <p class="card-description">
+                    Adjust each phone independently. Changes apply live to its assigned screen.
+                </p>
+                <div class="alignment-grid">
+                    ${[1, 2].map((screen) => `
+                        <section class="alignment-screen" data-alignment-screen="${screen}">
+                            <div class="alignment-screen-heading">
+                                <h3>Screen ${screen}</h3>
+                                <button class="alignment-reset" type="button" data-alignment-reset="${screen}" disabled>
+                                    Reset
+                                </button>
+                            </div>
+                            <label class="alignment-control">
+                                <span>Horizontal <output data-alignment-value="horizontal">0 px</output></span>
+                                <input type="range" min="-50" max="50" step="1" value="0" data-alignment-axis="horizontal" disabled>
+                            </label>
+                            <label class="alignment-control">
+                                <span>Vertical <output data-alignment-value="vertical">0 px</output></span>
+                                <input type="range" min="-50" max="50" step="1" value="0" data-alignment-axis="vertical" disabled>
+                            </label>
+                            <label class="alignment-control">
+                                <span>Scale <output data-alignment-value="scale">1.00×</output></span>
+                                <input type="range" min="0.95" max="1.05" step="0.01" value="1" data-alignment-axis="scale" disabled>
+                            </label>
+                        </section>
+                    `).join('')}
+                </div>
+                <p class="alignment-status" data-alignment-status role="status" aria-live="polite">
+                    Waiting for alignment settings from the server.
+                </p>
+            </section>
+
             <footer class="controller-footer">
                 <span>PARALLAX · Synchronized panoramic display</span>
                 <span>Images are limited to 15 MB</span>
@@ -154,12 +193,70 @@ export function mountController() {
     const progress = root.querySelector('[data-upload-progress]');
     const calibrationButton = root.querySelector('#calibration-toggle');
     const calibrationStatus = root.querySelector('#calibration-status');
+    const alignmentStatus = root.querySelector('[data-alignment-status]');
     const socket = createParallaxSocket();
 
     let selectedFile = null;
     let previewUrl = null;
     let uploadRequest = null;
     let calibrationEnabled = false;
+    const alignmentByScreen = {
+        1: { horizontal: 0, vertical: 0, scale: 1 },
+        2: { horizontal: 0, vertical: 0, scale: 1 }
+    };
+    const alignmentRequestByScreen = { 1: 0, 2: 0 };
+    let alignmentReady = false;
+
+    function renderAlignmentScreen(screen) {
+        const panel = root.querySelector(`[data-alignment-screen="${screen}"]`);
+        if (!panel) {
+            return;
+        }
+
+        const settings = alignmentByScreen[screen];
+        for (const axis of ['horizontal', 'vertical', 'scale']) {
+            const input = panel.querySelector(`[data-alignment-axis="${axis}"]`);
+            const output = panel.querySelector(`[data-alignment-value="${axis}"]`);
+            input.value = String(settings[axis]);
+            output.textContent = axis === 'scale'
+                ? `${settings[axis].toFixed(2)}×`
+                : `${settings[axis]} px`;
+            input.disabled = !alignmentReady;
+        }
+        panel.querySelector('[data-alignment-reset]').disabled = !alignmentReady;
+    }
+
+    function renderAlignmentUI() {
+        for (const screen of [1, 2]) {
+            renderAlignmentScreen(screen);
+        }
+    }
+
+    function publishAlignment(screen) {
+        if (!alignmentReady) {
+            return;
+        }
+
+        const request = ++alignmentRequestByScreen[screen];
+        const settings = { ...alignmentByScreen[screen] };
+        alignmentStatus.textContent = `Updating Screen ${screen} alignment...`;
+        socket.emit('alignment:set', {
+            screen,
+            settings
+        }, (response) => {
+            if (request !== alignmentRequestByScreen[screen]) {
+                return;
+            }
+
+            if (!response?.ok) {
+                alignmentStatus.textContent = response?.message || 'Alignment update failed.';
+                console.error('Alignment update failed:', response?.message);
+                return;
+            }
+
+            alignmentStatus.textContent = `Screen ${screen} alignment updated.`;
+        });
+    }
 
     function updateCalibrationUI() {
         if (calibrationButton) {
@@ -197,6 +294,27 @@ export function mountController() {
             }
         );
     });
+
+    for (const screen of [1, 2]) {
+        const panel = root.querySelector(`[data-alignment-screen="${screen}"]`);
+        panel.querySelectorAll('[data-alignment-axis]').forEach((input) => {
+            input.addEventListener('input', () => {
+                const axis = input.dataset.alignmentAxis;
+                alignmentByScreen[screen][axis] = Number(input.value);
+                renderAlignmentScreen(screen);
+                publishAlignment(screen);
+            });
+        });
+        panel.querySelector('[data-alignment-reset]').addEventListener('click', () => {
+            alignmentByScreen[screen] = {
+                horizontal: 0,
+                vertical: 0,
+                scale: 1
+            };
+            renderAlignmentScreen(screen);
+            publishAlignment(screen);
+        });
+    }
 
     function setPublishStatus(message, state = '') {
         publishStatus.textContent = message;
@@ -370,6 +488,8 @@ export function mountController() {
         socket.emit('controller:register');
     });
     socket.on('disconnect', () => {
+        alignmentReady = false;
+        renderAlignmentUI();
         root.querySelector('[data-controller-connection]').classList.remove('is-online');
         root.querySelector('[data-controller-connection-label]').textContent = 'Reconnecting to display system';
     });
@@ -385,6 +505,34 @@ export function mountController() {
 
         calibrationEnabled = state.enabled;
         updateCalibrationUI();
+    });
+    socket.on('alignment:current', (state) => {
+        const screens = state?.screens;
+        if (!screens || typeof screens !== 'object') {
+            return;
+        }
+
+        for (const screen of [1, 2]) {
+            const settings = screens[screen];
+            if (!settings
+                || !Number.isFinite(settings.horizontal)
+                || settings.horizontal < -50
+                || settings.horizontal > 50
+                || !Number.isFinite(settings.vertical)
+                || settings.vertical < -50
+                || settings.vertical > 50
+                || !Number.isFinite(settings.scale)
+                || settings.scale < 0.95
+                || settings.scale > 1.05) {
+                return;
+            }
+
+            alignmentByScreen[screen] = { ...settings };
+        }
+
+        alignmentReady = true;
+        renderAlignmentUI();
+        alignmentStatus.textContent = 'Alignment settings synchronized.';
     });
     socket.on('content:current', (content) => {
         if (content?.contentType === 'image' && content.imageUrl) {

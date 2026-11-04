@@ -42,6 +42,9 @@ function registerDevice(url, deviceId) {
         const initialCalibration = new Promise((resolve) => {
             socket.once('calibration:update', resolve);
         });
+        const initialAlignment = new Promise((resolve) => {
+            socket.once('alignment:update', resolve);
+        });
         const timer = setTimeout(() => {
             socket.disconnect();
             reject(new Error(`Timed out registering ${deviceId}`));
@@ -54,17 +57,151 @@ function registerDevice(url, deviceId) {
         });
         socket.once('device:assigned', (assignment) => {
             clearTimeout(timer);
-            resolve({ socket, assignment, initialContent, initialCalibration });
+            resolve({
+                socket,
+                assignment,
+                initialContent,
+                initialCalibration,
+                initialAlignment
+            });
         });
         socket.once('device:rejected', (result) => {
             clearTimeout(timer);
-            resolve({ socket, rejection: result, initialContent, initialCalibration });
+            resolve({
+                socket,
+                rejection: result,
+                initialContent,
+                initialCalibration,
+                initialAlignment
+            });
         });
         socket.on('connect', () => {
             socket.emit('device:register', deviceId);
         });
     });
 }
+
+test('authorizes and synchronizes independent screen alignment settings', async () => {
+    const server = await startServer({ reservationMs: 80 });
+    const clients = [];
+
+    try {
+        const first = await registerDevice(server.url, 'alignment-phone-one');
+        clients.push(first.socket);
+        const second = await registerDevice(server.url, 'alignment-phone-two');
+        clients.push(second.socket);
+
+        const defaults = {
+            1: { horizontal: 0, vertical: 0, scale: 1 },
+            2: { horizontal: 0, vertical: 0, scale: 1 }
+        };
+        assert.deepEqual((await first.initialAlignment).screens, defaults);
+        assert.deepEqual((await second.initialAlignment).screens, defaults);
+
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const currentAlignment = nextEvent(controller, 'alignment:current');
+        controller.emit('controller:register');
+        assert.deepEqual((await currentAlignment).screens, defaults);
+
+        const screenOneSettings = { horizontal: 12, vertical: -8, scale: 1.03 };
+        const firstUpdate = nextEvent(first.socket, 'alignment:update');
+        const secondUpdate = nextEvent(second.socket, 'alignment:update');
+        const screenOneResult = new Promise((resolve) => {
+            controller.emit('alignment:set', {
+                screen: 1,
+                settings: screenOneSettings
+            }, resolve);
+        });
+        const screenOnePayload = { screens: { ...defaults, 1: screenOneSettings } };
+        assert.deepEqual(await firstUpdate, screenOnePayload);
+        assert.deepEqual(await secondUpdate, screenOnePayload);
+        assert.deepEqual(await screenOneResult, {
+            ok: true,
+            screen: 1,
+            settings: screenOneSettings
+        });
+
+        const screenTwoSettings = { horizontal: -20, vertical: 25, scale: 0.97 };
+        const firstScreenTwoUpdate = nextEvent(first.socket, 'alignment:update');
+        const secondScreenTwoUpdate = nextEvent(second.socket, 'alignment:update');
+        const screenTwoResult = new Promise((resolve) => {
+            controller.emit('alignment:set', {
+                screen: 2,
+                settings: screenTwoSettings
+            }, resolve);
+        });
+        const bothScreens = {
+            screens: { ...screenOnePayload.screens, 2: screenTwoSettings }
+        };
+        assert.deepEqual(await firstScreenTwoUpdate, bothScreens);
+        assert.deepEqual(await secondScreenTwoUpdate, bothScreens);
+        assert.deepEqual(await screenTwoResult, {
+            ok: true,
+            screen: 2,
+            settings: screenTwoSettings
+        });
+
+        const currentAlignmentAfterUpdate = nextEvent(controller, 'alignment:current');
+        controller.emit('controller:register');
+        assert.deepEqual((await currentAlignmentAfterUpdate).screens, bothScreens.screens);
+
+        const invalidSettings = [
+            { ...screenOneSettings, horizontal: '12' },
+            { ...screenOneSettings, horizontal: Number.NaN },
+            { ...screenOneSettings, vertical: null },
+            { ...screenOneSettings, vertical: Number.POSITIVE_INFINITY },
+            { ...screenOneSettings, scale: 1.06 },
+            { ...screenOneSettings, horizontal: -51 },
+            { ...screenOneSettings, vertical: 51 },
+            { ...screenOneSettings, scale: 0.94 }
+        ];
+        for (const settings of invalidSettings) {
+            const result = await new Promise((resolve) => {
+                controller.emit('alignment:set', { screen: 1, settings }, resolve);
+            });
+            assert.deepEqual(result, {
+                ok: false,
+                message: 'Invalid alignment settings'
+            });
+        }
+
+        for (const screen of [0, 3, '1']) {
+            const result = await new Promise((resolve) => {
+                controller.emit('alignment:set', {
+                    screen,
+                    settings: screenOneSettings
+                }, resolve);
+            });
+            assert.equal(result.ok, false);
+        }
+
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        const unauthorizedResult = await new Promise((resolve) => {
+            unauthorized.emit('alignment:set', {
+                screen: 1,
+                settings: { horizontal: 0, vertical: 0, scale: 1 }
+            }, resolve);
+        });
+        assert.deepEqual(unauthorizedResult, {
+            ok: false,
+            message: 'Unauthorized alignment request'
+        });
+
+        await waitForDisconnect(first.socket);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const replacement = await registerDevice(server.url, 'alignment-phone-three');
+        clients.push(replacement.socket);
+        assert.equal(replacement.assignment.screen, 1);
+        assert.deepEqual((await replacement.initialAlignment).screens, bothScreens.screens);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
 
 test('authorizes calibration controllers and synchronizes current state to displays', async () => {
     const server = await startServer({ reservationMs: 80 });

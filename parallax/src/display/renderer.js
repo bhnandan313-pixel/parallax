@@ -10,6 +10,7 @@ export function createContentRenderer({
    let latestRequest = 0;
 let calibrationEnabled = false;
 let calibrationOverlay = null;
+let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
 
 function ensureCalibrationOverlay() {
     if (calibrationOverlay) {
@@ -100,6 +101,11 @@ function ensureCalibrationOverlay() {
     updateCalibrationPosition();
 }
 
+    function applyAlignment(image) {
+        image.style.transformOrigin = '50% 50%';
+        image.style.transform = `translate(${activeAlignment.horizontal}px, ${activeAlignment.vertical}px) scale(${activeAlignment.scale})`;
+    }
+
     function render(content) {
         if (content?.contentType !== 'image'
             || typeof content.imageUrl !== 'string'
@@ -122,6 +128,7 @@ function ensureCalibrationOverlay() {
             }
 
             image.style.left = activeScreen === 1 ? '0' : '-100%';
+            applyAlignment(image);
 
             if (displayedImage?.parentNode === container) {
                 container.replaceChild(image, displayedImage);
@@ -165,9 +172,35 @@ if (calibrationOverlay) {
         if (displayedImage) {
             displayedImage.alt = `Panorama screen ${activeScreen}`;
             displayedImage.style.left = activeScreen === 1 ? '0' : '-100%';
+            applyAlignment(displayedImage);
         }
 
         updateCalibrationPosition();
+    };
+
+    render.setAlignment = (settings) => {
+        if (!settings
+            || !Number.isFinite(settings.horizontal)
+            || settings.horizontal < -50
+            || settings.horizontal > 50
+            || !Number.isFinite(settings.vertical)
+            || settings.vertical < -50
+            || settings.vertical > 50
+            || !Number.isFinite(settings.scale)
+            || settings.scale < 0.95
+            || settings.scale > 1.05) {
+            return false;
+        }
+
+        activeAlignment = {
+            horizontal: settings.horizontal,
+            vertical: settings.vertical,
+            scale: settings.scale
+        };
+        if (displayedImage) {
+            applyAlignment(displayedImage);
+        }
+        return true;
     };
 
     render.setCalibration = setCalibration;

@@ -74,6 +74,18 @@ test('preloads content, splits each screen correctly, and keeps the old image on
         images[0].load();
         assert.equal(container.querySelector('#panorama'), images[0]);
         assert.equal(images[0].style.left, screen === 1 ? '0' : '-100%');
+        assert.equal(images[0].style.transform, 'translate(0px, 0px) scale(1)');
+        assert.equal(images[0].style.transformOrigin, '50% 50%');
+
+        assert.equal(render.setAlignment({
+            horizontal: 18,
+            vertical: -12,
+            scale: 1.04
+        }), true);
+        assert.equal(
+            images[0].style.transform,
+            'translate(18px, -12px) scale(1.04)'
+        );
 
         render({
             contentType: 'image',
@@ -84,6 +96,19 @@ test('preloads content, splits each screen correctly, and keeps the old image on
         images[1].fail();
         assert.equal(container.querySelector('#panorama'), images[0]);
     }
+});
+
+test('rejects invalid alignment settings without changing the displayed transform', () => {
+    const { images, render } = setupRenderer(2);
+    render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'first' });
+    images[0].load();
+
+    assert.equal(render.setAlignment({
+        horizontal: 51,
+        vertical: 0,
+        scale: 1
+    }), false);
+    assert.equal(images[0].style.transform, 'translate(0px, 0px) scale(1)');
 });
 
 test('does not let an older image load replace a newer update', () => {
