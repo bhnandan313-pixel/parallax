@@ -168,7 +168,9 @@ export function createParallaxServer({
             const sameHost = originUrl.hostname === req.hostname;
             const loopbackOrigin = ['localhost', '127.0.0.1', '[::1]'].includes(originUrl.hostname)
                 && ['localhost', '127.0.0.1', '[::1]'].includes(req.hostname);
-            if ((!sameHost && !loopbackOrigin) || !['', '5173'].includes(originUrl.port)) {
+            const vitePort = Number(originUrl.port);
+            const isVitePort = originUrl.port === '' || (vitePort >= 5173 && vitePort <= 5199);
+            if ((!sameHost && !loopbackOrigin) || !isVitePort) {
                 res.status(403).json({ error: 'Upload origin is not allowed' });
                 return;
             }

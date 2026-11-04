@@ -432,6 +432,24 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
 
         assert.equal(preflightResponse.status, 204);
 
+        const viteFallbackResponse = await fetch(`${server.url}/api/upload`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: 'http://localhost:5174',
+                'Access-Control-Request-Method': 'POST'
+            }
+        });
+        assert.equal(viteFallbackResponse.status, 204);
+
+        const nonVitePortResponse = await fetch(`${server.url}/api/upload`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: 'http://localhost:8080',
+                'Access-Control-Request-Method': 'POST'
+            }
+        });
+        assert.equal(nonVitePortResponse.status, 403);
+
         const hostileOriginResponse = await fetch(`${server.url}/api/upload`, {
             method: 'OPTIONS',
             headers: {
