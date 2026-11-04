@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,12 +8,24 @@ import sharp from 'sharp';
 import { createParallaxServer } from '../server.js';
 
 async function startServer(options) {
-    const uploadDirectory = await mkdtemp(join(tmpdir(), 'parallax-test-'));
+    const {
+        testDirectory: providedTestDirectory,
+        calibrationFile: providedCalibrationFile,
+        uploadDirectory: providedUploadDirectory,
+        ...serverOptions
+    } = options ?? {};
+    const testDirectory = providedTestDirectory
+        ?? await mkdtemp(join(tmpdir(), 'parallax-test-'));
+    const uploadDirectory = providedUploadDirectory ?? join(testDirectory, 'uploads');
+    const calibrationFile = providedCalibrationFile
+        ?? join(testDirectory, 'data', 'calibration.json');
     const instance = createParallaxServer({
         publicBaseUrl: 'http://parallax-test.invalid:3001',
-        ...options,
+        ...serverOptions,
+        calibrationFile,
         uploadDirectory
     });
+    await instance.ready;
     await new Promise((resolve, reject) => {
         instance.server.once('error', reject);
         instance.server.listen(0, '127.0.0.1', resolve);
@@ -23,9 +35,12 @@ async function startServer(options) {
     return {
         ...instance,
         url: `http://127.0.0.1:${port}`,
+        calibrationFile,
         close: async () => {
             await instance.close();
-            await rm(uploadDirectory, { recursive: true, force: true });
+            if (!providedTestDirectory) {
+                await rm(testDirectory, { recursive: true, force: true });
+            }
         }
     };
 }
@@ -282,6 +297,127 @@ test('authorizes calibration controllers and synchronizes current state to displ
             socket.disconnect();
         }
         await server.close();
+    }
+});
+
+test('creates default settings and restores calibration and independent alignment settings after restart', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-persistence-test-'));
+    const defaultSettings = {
+        calibrationEnabled: false,
+        screens: {
+            1: { horizontal: 0, vertical: 0, scale: 1 },
+            2: { horizontal: 0, vertical: 0, scale: 1 }
+        }
+    };
+    const screenOne = { horizontal: 20, vertical: 0, scale: 1 };
+    const screenTwo = { horizontal: 0, vertical: -15, scale: 1 };
+    let server = await startServer({ testDirectory });
+    let clients = [];
+
+    try {
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), defaultSettings);
+
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        const enableResult = await new Promise((resolve) => {
+            controller.emit('calibration:set', { enabled: true }, resolve);
+        });
+        assert.deepEqual(enableResult, { ok: true, enabled: true });
+
+        const screenOneResult = await new Promise((resolve) => {
+            controller.emit('alignment:set', { screen: 1, settings: screenOne }, resolve);
+        });
+        assert.deepEqual(screenOneResult, { ok: true, screen: 1, settings: screenOne });
+
+        const screenTwoResult = await new Promise((resolve) => {
+            controller.emit('alignment:set', { screen: 2, settings: screenTwo }, resolve);
+        });
+        assert.deepEqual(screenTwoResult, { ok: true, screen: 2, settings: screenTwo });
+
+        const savedSettings = {
+            calibrationEnabled: true,
+            screens: { 1: screenOne, 2: screenTwo }
+        };
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), savedSettings);
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients = [];
+        await server.close();
+
+        server = await startServer({ testDirectory });
+        const firstPhone = await registerDevice(server.url, 'persisted-phone-one');
+        clients.push(firstPhone.socket);
+        const secondPhone = await registerDevice(server.url, 'persisted-phone-two');
+        clients.push(secondPhone.socket);
+        assert.equal(firstPhone.assignment.screen, 1);
+        assert.equal(secondPhone.assignment.screen, 2);
+        assert.deepEqual(await firstPhone.initialCalibration, { enabled: true });
+        assert.deepEqual(await secondPhone.initialCalibration, { enabled: true });
+        assert.deepEqual((await firstPhone.initialAlignment).screens, savedSettings.screens);
+        assert.deepEqual((await secondPhone.initialAlignment).screens, savedSettings.screens);
+
+        const restartedController = await connectClient(server.url);
+        clients.push(restartedController);
+        const currentCalibration = nextEvent(restartedController, 'calibration:current');
+        const currentAlignment = nextEvent(restartedController, 'alignment:current');
+        restartedController.emit('controller:register');
+        assert.deepEqual(await currentCalibration, { enabled: true });
+        assert.deepEqual((await currentAlignment).screens, savedSettings.screens);
+
+        const resetSettings = { horizontal: 0, vertical: 0, scale: 1 };
+        const resetResult = await new Promise((resolve) => {
+            restartedController.emit('alignment:set', { screen: 1, settings: resetSettings }, resolve);
+        });
+        assert.deepEqual(resetResult, { ok: true, screen: 1, settings: resetSettings });
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), {
+            calibrationEnabled: true,
+            screens: { 1: resetSettings, 2: screenTwo }
+        });
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('repairs corrupted calibration settings with safe defaults', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-corrupt-settings-test-'));
+    const calibrationFile = join(testDirectory, 'data', 'calibration.json');
+    let server;
+
+    try {
+        await mkdir(join(testDirectory, 'data'), { recursive: true });
+        await writeFile(calibrationFile, '{"calibrationEnabled":', 'utf8');
+        server = await startServer({ testDirectory });
+
+        assert.deepEqual(JSON.parse(await readFile(calibrationFile, 'utf8')), {
+            calibrationEnabled: false,
+            screens: {
+                1: { horizontal: 0, vertical: 0, scale: 1 },
+                2: { horizontal: 0, vertical: 0, scale: 1 }
+            }
+        });
+
+        const phone = await registerDevice(server.url, 'corrupt-settings-phone');
+        try {
+            assert.deepEqual(await phone.initialCalibration, { enabled: false });
+            assert.deepEqual((await phone.initialAlignment).screens, {
+                1: { horizontal: 0, vertical: 0, scale: 1 },
+                2: { horizontal: 0, vertical: 0, scale: 1 }
+            });
+        } finally {
+            phone.socket.disconnect();
+        }
+    } finally {
+        if (server) {
+            await server.close();
+        }
+        await rm(testDirectory, { recursive: true, force: true });
     }
 });
 

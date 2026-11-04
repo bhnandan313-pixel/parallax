@@ -1,0 +1,15 @@
+{
+  "calibrationEnabled": false,
+  "screens": {
+    "1": {
+      "horizontal": 44,
+      "vertical": 50,
+      "scale": 1
+    },
+    "2": {
+      "horizontal": 0,
+      "vertical": 0,
+      "scale": 1
+    }
+  }
+}

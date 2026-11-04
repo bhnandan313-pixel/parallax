@@ -58,6 +58,8 @@ Open the Vite URL printed in the terminal (normally <http://localhost:5173/>).
 
 Open the display page on up to two devices. Once they connect, use the controller to upload and publish an image, enable calibration, or adjust each screen's alignment. Supported uploads are JPG, PNG, and WebP files up to 15 MB.
 
+Calibration enabled state and each screen's alignment are stored in `server/data/calibration.json` and restored when the backend starts. The backend creates this file with default settings when it is missing; invalid or corrupted settings are logged and replaced with safe defaults.
+
 ## Use devices on the same network
 
 To access the frontend from phones or other devices on your local network, start Vite with a network host in Terminal 2:

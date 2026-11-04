@@ -1,9 +1,9 @@
 import express from 'express';
 import http from 'http';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import sharp from 'sharp';
@@ -48,7 +48,8 @@ function getPrivateLanAddress() {
 export function createParallaxServer({
     reservationMs = 30_000,
     publicBaseUrl = process.env.PARALLAX_PUBLIC_URL,
-    uploadDirectory = fileURLToPath(new URL('./uploads/', import.meta.url))
+    uploadDirectory = fileURLToPath(new URL('./uploads/', import.meta.url)),
+    calibrationFile = fileURLToPath(new URL('./data/calibration.json', import.meta.url))
 } = {}) {
     const app = express();
     const server = http.createServer(app);
@@ -77,10 +78,110 @@ export function createParallaxServer({
         updateId: 'default-panorama'
     };
     let calibrationEnabled = false;
-    const alignmentSettings = {
-        1: { horizontal: 0, vertical: 0, scale: 1 },
-        2: { horizontal: 0, vertical: 0, scale: 1 }
-    };
+    const alignmentSettings = createDefaultAlignmentSettings();
+    let settingsUpdateQueue = Promise.resolve();
+
+    function getSettingsSnapshot() {
+        return {
+            calibrationEnabled,
+            screens: getAlignmentSnapshot()
+        };
+    }
+
+    async function writeSettings(settings) {
+        const temporaryFile = `${calibrationFile}.${randomUUID()}.tmp`;
+        try {
+            await writeFile(temporaryFile, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+            await rename(temporaryFile, calibrationFile);
+        } catch (error) {
+            await unlink(temporaryFile).catch((cleanupError) => {
+                if (cleanupError.code !== 'ENOENT') {
+                    console.error('Unable to clean up temporary calibration settings:', cleanupError);
+                }
+            });
+            throw error;
+        }
+    }
+
+    async function loadSettings() {
+        await mkdir(dirname(calibrationFile), { recursive: true });
+
+        let contents;
+        try {
+            contents = await readFile(calibrationFile, 'utf8');
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                throw error;
+            }
+
+            const defaults = {
+                calibrationEnabled: false,
+                screens: createDefaultAlignmentSettings()
+            };
+            await writeSettings(defaults);
+            return defaults;
+        }
+
+        let settings;
+        let shouldRepair = false;
+        try {
+            settings = JSON.parse(contents);
+        } catch (error) {
+            if (!(error instanceof SyntaxError)) {
+                throw error;
+            }
+            console.warn(`Calibration settings are corrupted; restoring defaults from ${calibrationFile}`);
+            settings = {
+                calibrationEnabled: false,
+                screens: createDefaultAlignmentSettings()
+            };
+            shouldRepair = true;
+        }
+
+        if (!isValidStoredSettings(settings)) {
+            console.warn(`Calibration settings are invalid; restoring defaults from ${calibrationFile}`);
+            settings = {
+                calibrationEnabled: false,
+                screens: createDefaultAlignmentSettings()
+            };
+            shouldRepair = true;
+        }
+
+        if (shouldRepair) {
+            await writeSettings(settings);
+        }
+
+        return settings;
+    }
+
+    const ready = loadSettings().then((settings) => {
+        calibrationEnabled = settings.calibrationEnabled;
+        alignmentSettings[1] = { ...settings.screens[1] };
+        alignmentSettings[2] = { ...settings.screens[2] };
+    });
+
+    function updateSettings(update) {
+        const operation = settingsUpdateQueue.then(async () => {
+            const previous = getSettingsSnapshot();
+            update();
+            const updated = getSettingsSnapshot();
+
+            if (JSON.stringify(previous) !== JSON.stringify(updated)) {
+                try {
+                    await writeSettings(updated);
+                } catch (error) {
+                    calibrationEnabled = previous.calibrationEnabled;
+                    alignmentSettings[1] = previous.screens[1];
+                    alignmentSettings[2] = previous.screens[2];
+                    throw error;
+                }
+            }
+
+            return updated;
+        });
+        settingsUpdateQueue = operation.catch(() => {});
+        return operation;
+    }
 
     function getAlignmentSnapshot() {
         return {
@@ -402,7 +503,7 @@ export function createParallaxServer({
             broadcastDeviceSnapshot(socket);
         });
 
-        socket.on('calibration:set', (state, acknowledge) => {
+        socket.on('calibration:set', async (state, acknowledge) => {
             const respond = typeof acknowledge === 'function'
                 ? acknowledge
                 : () => {};
@@ -423,7 +524,18 @@ export function createParallaxServer({
                 return;
             }
 
-            calibrationEnabled = state.enabled;
+            try {
+                await updateSettings(() => {
+                    calibrationEnabled = state.enabled;
+                });
+            } catch (error) {
+                console.error('Unable to persist calibration settings:', error);
+                respond({
+                    ok: false,
+                    message: 'Unable to save calibration settings'
+                });
+                return;
+            }
 
             io.to(deviceRoom).emit('calibration:update', {
                 enabled: calibrationEnabled
@@ -435,7 +547,7 @@ export function createParallaxServer({
             });
         });
 
-        socket.on('alignment:set', (state, acknowledge) => {
+        socket.on('alignment:set', async (state, acknowledge) => {
             const respond = typeof acknowledge === 'function'
                 ? acknowledge
                 : () => {};
@@ -456,11 +568,22 @@ export function createParallaxServer({
                 return;
             }
 
-            alignmentSettings[state.screen] = {
-                horizontal: state.settings.horizontal,
-                vertical: state.settings.vertical,
-                scale: state.settings.scale
-            };
+            try {
+                await updateSettings(() => {
+                    alignmentSettings[state.screen] = {
+                        horizontal: state.settings.horizontal,
+                        vertical: state.settings.vertical,
+                        scale: state.settings.scale
+                    };
+                });
+            } catch (error) {
+                console.error('Unable to persist alignment settings:', error);
+                respond({
+                    ok: false,
+                    message: 'Unable to save alignment settings'
+                });
+                return;
+            }
             const screens = getAlignmentSnapshot();
 
             io.to(deviceRoom).emit('alignment:update', { screens });
@@ -510,13 +633,49 @@ export function createParallaxServer({
         await new Promise((resolveClose) => io.close(resolveClose));
     }
 
-    return { app, server, io, close };
+    return { app, server, io, close, ready };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-    const { server } = createParallaxServer();
+    const { server, ready } = createParallaxServer();
     const port = Number(process.env.PORT || 3001);
-    server.listen(port, '0.0.0.0', () => {
-        console.log(`PARALLAX SERVER ONLINE: ${port}`);
+    ready.then(() => {
+        server.listen(port, '0.0.0.0', () => {
+            console.log(`PARALLAX SERVER ONLINE: ${port}`);
+        });
+    }).catch((error) => {
+        console.error('Unable to load calibration settings:', error);
+        process.exitCode = 1;
     });
+}
+
+function createDefaultAlignmentSettings() {
+    return {
+        1: { horizontal: 0, vertical: 0, scale: 1 },
+        2: { horizontal: 0, vertical: 0, scale: 1 }
+    };
+}
+
+function isValidStoredSettings(settings) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)
+        || typeof settings.calibrationEnabled !== 'boolean'
+        || !settings.screens || typeof settings.screens !== 'object'
+        || Array.isArray(settings.screens)) {
+        return false;
+    }
+
+    return [1, 2].every((screen) => validateStoredAlignment(settings.screens[screen]));
+}
+
+function validateStoredAlignment(settings) {
+    return settings && typeof settings === 'object' && !Array.isArray(settings)
+        && Number.isFinite(settings.horizontal)
+        && settings.horizontal >= -50
+        && settings.horizontal <= 50
+        && Number.isFinite(settings.vertical)
+        && settings.vertical >= -50
+        && settings.vertical <= 50
+        && Number.isFinite(settings.scale)
+        && settings.scale >= 0.95
+        && settings.scale <= 1.05;
 }
