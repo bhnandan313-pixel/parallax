@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { io as createSocket } from 'socket.io-client';
 import sharp from 'sharp';
 import { createParallaxServer } from '../server.js';
+import { createDefaultLayout } from '../../src/display/geometry.js';
 
 function defaultScreens(count = 12) {
     return Object.fromEntries(Array.from({ length: count }, (_, index) => [
@@ -15,14 +16,35 @@ function defaultScreens(count = 12) {
 }
 
 function storedSettings({ calibrationEnabled = false, screens = {}, assignments = {},
-    totalScreens = 2, assignmentMode = 'automatic', presets = [] } = {}) {
+    totalScreens = 2, assignmentMode = 'automatic', presets = [],
+    layout = defaultLayout(totalScreens), layoutPresets = [] } = {}) {
     return {
         calibrationEnabled,
         totalScreens,
         assignmentMode,
         assignments,
         screens: { ...defaultScreens(), ...screens },
-        presets
+        presets,
+        layout,
+        layoutPresets
+    };
+}
+
+function defaultLayout(totalScreens) {
+    return {
+        type: 'horizontal',
+        rows: 1,
+        columns: totalScreens,
+        screens: Object.fromEntries(Array.from({ length: totalScreens }, (_, index) => [
+            index + 1,
+            {
+                row: 0,
+                column: index,
+                rotation: 0,
+                orientation: 'auto',
+                enabled: true
+            }
+        ]))
     };
 }
 
@@ -31,6 +53,7 @@ async function startServer(options) {
         testDirectory: providedTestDirectory,
         calibrationFile: providedCalibrationFile,
         uploadDirectory: providedUploadDirectory,
+        mediaManifestFile: providedMediaManifestFile,
         ...serverOptions
     } = options ?? {};
     const testDirectory = providedTestDirectory
@@ -38,10 +61,13 @@ async function startServer(options) {
     const uploadDirectory = providedUploadDirectory ?? join(testDirectory, 'uploads');
     const calibrationFile = providedCalibrationFile
         ?? join(testDirectory, 'data', 'calibration.json');
+    const mediaManifestFile = providedMediaManifestFile
+        ?? join(testDirectory, 'data', 'media.json');
     const instance = createParallaxServer({
         publicBaseUrl: 'http://parallax-test.invalid:3001',
         ...serverOptions,
         calibrationFile,
+        mediaManifestFile,
         uploadDirectory
     });
     await instance.ready;
@@ -55,6 +81,7 @@ async function startServer(options) {
         ...instance,
         url: `http://127.0.0.1:${port}`,
         calibrationFile,
+        mediaManifestFile,
         close: async () => {
             await instance.close();
             if (!providedTestDirectory) {
@@ -1086,6 +1113,271 @@ test('streams a four-screen dashboard snapshot and safely assigns and identifies
     }
 });
 
+test('validates, persists, and synchronizes display geometry and layout presets', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-layout-test-'));
+    let server = await startServer({ testDirectory });
+    const clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        assert.equal((await emitAck(controller, 'screen-config:set', {
+            totalScreens: 4,
+            assignmentMode: 'automatic'
+        })).ok, true);
+        const phones = [];
+        for (let screen = 1; screen <= 4; screen += 1) {
+            const phone = await registerDevice(server.url, `geometry-phone-${screen}`);
+            phones.push(phone);
+            clients.push(phone.socket);
+            assert.equal(phone.assignment.screen, screen);
+        }
+
+        const horizontal = createDefaultLayout(4);
+        const horizontalResult = await emitAck(controller, 'layout:set', { layout: horizontal });
+        assert.equal(horizontalResult.ok, true);
+        assert.equal(horizontalResult.layout.type, 'horizontal');
+
+        const vertical = createDefaultLayout(4, 'vertical');
+        assert.equal((await emitAck(controller, 'layout:set', { layout: vertical })).ok, true);
+        assert.deepEqual((await emitAck(controller, 'layout:set', {
+            layout: createDefaultLayout(4, 'grid', 2, 2)
+        })).layout.screens[4], {
+            row: 1, column: 1, rotation: 0, orientation: 'auto', enabled: true
+        });
+
+        const custom = {
+            type: 'custom',
+            rows: 3,
+            columns: 2,
+            screens: {
+                1: { row: 0, column: 0, rotation: 0, orientation: 'auto', enabled: true },
+                2: { row: 0, column: 1, rotation: 90, orientation: 'portrait', enabled: true },
+                3: { row: 2, column: 0, rotation: 180, orientation: 'landscape', enabled: true },
+                4: { row: 2, column: 1, rotation: 270, orientation: 'auto', enabled: true }
+            }
+        };
+        const phoneGeometryUpdate = nextMatchingEvent(
+            phones[1].socket,
+            'layout:update',
+            (state) => JSON.stringify(state.layout) === JSON.stringify(custom)
+        );
+        const customResult = await emitAck(controller, 'layout:set', { layout: custom });
+        assert.equal(customResult.ok, true);
+        assert.deepEqual(customResult.layout, custom);
+        assert.deepEqual((await phoneGeometryUpdate).layout, custom);
+
+        const overlap = structuredClone(custom);
+        overlap.screens[4].row = 2;
+        overlap.screens[4].column = 0;
+        assert.equal((await emitAck(controller, 'layout:set', { layout: overlap })).ok, false);
+        assert.equal((await emitAck(controller, 'screen:configure', {
+            screen: 4,
+            position: { row: 2, column: 0, rotation: 0, orientation: 'auto' }
+        })).ok, false);
+
+        const assignedDisabled = nextMatchingEvent(
+            phones[2].socket,
+            'layout:update',
+            (state) => state.layout.screens[3].enabled === false
+        );
+        const disabledDiagnostics = nextMatchingEvent(
+            controller,
+            'diagnostics:update',
+            (state) => state.devices.find(({ screen }) => screen === 3)?.status === 'disabled'
+        );
+        const disabled = await emitAck(controller, 'screen:disable', { screen: 3 });
+        assert.deepEqual(disabled, { ok: true, screen: 3, enabled: false });
+        assert.equal((await assignedDisabled).layout.screens[3].enabled, false);
+        assert.equal(
+            (await disabledDiagnostics).devices.find(({ screen }) => screen === 3).status,
+            'disabled'
+        );
+
+        const restoredAssignment = nextMatchingEvent(
+            phones[2].socket,
+            'layout:update',
+            (state) => state.layout.screens[3].enabled === true
+        );
+        assert.deepEqual(await emitAck(controller, 'screen:enable', { screen: 3 }), {
+            ok: true, screen: 3, enabled: true
+        });
+        assert.equal((await restoredAssignment).layout.screens[3].enabled, true);
+
+        assert.equal((await emitAck(controller, 'layout-presets:save', {
+            name: 'Gap and rotation'
+        })).ok, true);
+        assert.equal((await emitAck(controller, 'layout-presets:save', {
+            name: 'Gap and rotation'
+        })).ok, false);
+        assert.equal((await emitAck(controller, 'layout-presets:load', {
+            name: 'Default'
+        })).layout.type, 'horizontal');
+        const savedPreset = await emitAck(controller, 'layout-presets:load', {
+            name: 'Gap and rotation'
+        });
+        assert.deepEqual(savedPreset.layout, custom);
+        assert.equal((await emitAck(controller, 'layout-presets:delete', {
+            name: 'Default'
+        })).ok, false);
+
+        const settingsBeforeRestart = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        assert.deepEqual(settingsBeforeRestart.layout, custom);
+        assert.equal(settingsBeforeRestart.assignments['geometry-phone-3'], 3);
+        assert.deepEqual(settingsBeforeRestart.layoutPresets[0].layout, custom);
+        assert.deepEqual(settingsBeforeRestart.screens[1], { horizontal: 0, vertical: 0, scale: 1 });
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients.length = 0;
+        await server.close();
+        server = await startServer({ testDirectory });
+        const restoredController = await connectClient(server.url);
+        clients.push(restoredController);
+        const currentConfiguration = nextEvent(restoredController, 'screen-config:current');
+        const currentLayoutPresets = nextEvent(restoredController, 'layout-presets:current');
+        restoredController.emit('controller:register');
+        assert.deepEqual((await currentConfiguration).layout, custom);
+        assert.ok((await currentLayoutPresets).presets.some((preset) =>
+            preset.name === 'Gap and rotation' && preset.layout.type === 'custom'));
+        const restoredPhone = await registerDevice(server.url, 'geometry-phone-3');
+        clients.push(restoredPhone.socket);
+        assert.equal(restoredPhone.assignment.screen, 3);
+        assert.deepEqual(restoredPhone.assignment.layout, custom);
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        assert.equal((await emitAck(unauthorized, 'layout:set', { layout: custom })).ok, false);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('resets only display layout to default while preserving devices and calibration across restart', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-layout-reset-test-'));
+    let server = await startServer({ testDirectory });
+    const clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        assert.equal((await emitAck(controller, 'screen-config:set', {
+            totalScreens: 4,
+            assignmentMode: 'automatic'
+        })).ok, true);
+
+        const phones = [];
+        for (let screen = 1; screen <= 4; screen += 1) {
+            const phone = await registerDevice(server.url, `layout-reset-phone-${screen}`);
+            phones.push(phone);
+            clients.push(phone.socket);
+            assert.equal(phone.assignment.screen, screen);
+        }
+
+        const calibration = { horizontal: 12.5, vertical: -7, scale: 1.03 };
+        assert.deepEqual(await emitAck(controller, 'calibration:set', { enabled: true }), {
+            ok: true, enabled: true
+        });
+        assert.deepEqual(await emitAck(controller, 'alignment:set', {
+            screen: 2,
+            settings: calibration
+        }), { ok: true, screen: 2, settings: calibration });
+        assert.equal((await emitAck(controller, 'preset:save', {
+            name: 'Keep calibration'
+        })).ok, true);
+
+        const customLayout = createDefaultLayout(4, 'grid', 2, 2);
+        customLayout.screens[1] = {
+            ...customLayout.screens[1],
+            rotation: 90,
+            orientation: 'portrait',
+            enabled: false
+        };
+        assert.equal((await emitAck(controller, 'layout:set', {
+            layout: customLayout
+        })).ok, true);
+        assert.equal((await emitAck(controller, 'layout-presets:save', {
+            name: 'Keep layout preset'
+        })).ok, true);
+
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        assert.match((await emitAck(unauthorized, 'layout:reset', {})).message, /Unauthorized/);
+        assert.equal((await emitAck(controller, 'layout:reset', { layout: customLayout })).ok, false);
+
+        const settingsBeforeReset = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        const defaultLayout = createDefaultLayout(4);
+        const phoneLayoutUpdates = phones.map(({ socket }) => nextMatchingEvent(
+            socket,
+            'layout:update',
+            (state) => JSON.stringify(state.layout) === JSON.stringify(defaultLayout)
+        ));
+        const reset = await emitAck(controller, 'layout:reset', {});
+        assert.equal(reset.ok, true);
+        assert.equal(reset.totalScreens, 4);
+        assert.deepEqual(reset.layout, defaultLayout);
+        for (const update of await Promise.all(phoneLayoutUpdates)) {
+            assert.equal(update.totalScreens, 4);
+            assert.deepEqual(update.layout, defaultLayout);
+        }
+
+        const settingsAfterReset = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        assert.deepEqual(settingsAfterReset, {
+            ...settingsBeforeReset,
+            layout: defaultLayout
+        });
+        assert.equal(settingsAfterReset.calibrationEnabled, true);
+        assert.deepEqual(settingsAfterReset.screens[2], calibration);
+        assert.ok(settingsAfterReset.presets.some(({ name }) => name === 'Keep calibration'));
+        assert.deepEqual(settingsAfterReset.assignments, {
+            'layout-reset-phone-1': 1,
+            'layout-reset-phone-2': 2,
+            'layout-reset-phone-3': 3,
+            'layout-reset-phone-4': 4
+        });
+        assert.ok(settingsAfterReset.layoutPresets.some(({ name }) =>
+            name === 'Keep layout preset'));
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients.length = 0;
+        await server.close();
+        server = await startServer({ testDirectory });
+
+        const restoredController = await connectClient(server.url);
+        clients.push(restoredController);
+        const restoredConfig = nextEvent(restoredController, 'screen-config:current');
+        const restoredCalibration = nextEvent(restoredController, 'calibration:current');
+        const restoredPresets = nextEvent(restoredController, 'presets:current');
+        restoredController.emit('controller:register');
+        assert.equal((await restoredConfig).totalScreens, 4);
+        assert.deepEqual((await restoredConfig).layout, defaultLayout);
+        assert.deepEqual(await restoredCalibration, { enabled: true });
+        assert.ok((await restoredPresets).presets.some(({ name }) => name === 'Keep calibration'));
+
+        for (let screen = 1; screen <= 4; screen += 1) {
+            const phone = await registerDevice(server.url, `layout-reset-phone-${screen}`);
+            clients.push(phone.socket);
+            assert.equal(phone.assignment.screen, screen);
+            assert.deepEqual(phone.assignment.layout, defaultLayout);
+        }
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), settingsAfterReset);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
 function connectClient(url) {
     return new Promise((resolve, reject) => {
         const socket = createSocket(url, {
@@ -1099,18 +1391,36 @@ function connectClient(url) {
 
 function emitAck(socket, eventName, payload) {
     return new Promise((resolve) => {
-        socket.timeout(10_000).emit(eventName, payload, (error, response) => {
+        const acknowledge = (error, response) => {
             if (error) {
                 resolve({ ok: false, message: `Timed out waiting for ${eventName}` });
                 return;
             }
             resolve(response);
-        });
+        };
+        if (payload === undefined) {
+            socket.timeout(10_000).emit(eventName, acknowledge);
+        } else {
+            socket.timeout(10_000).emit(eventName, payload, acknowledge);
+        }
     });
 }
 
 function nextEvent(socket, eventName) {
     return new Promise((resolve) => socket.once(eventName, resolve));
+}
+
+function nextMatchingEvent(socket, eventName, predicate) {
+    return new Promise((resolve) => {
+        const onEvent = (payload) => {
+            if (!predicate(payload)) {
+                return;
+            }
+            socket.off(eventName, onEvent);
+            resolve(payload);
+        };
+        socket.on(eventName, onEvent);
+    });
 }
 
 function waitForDisconnect(socket) {
@@ -1140,6 +1450,8 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
 
         const control = await connectClient(server.url);
         clients.push(control);
+        const controllerSession = await emitAck(control, 'controller:register');
+        assert.equal(controllerSession.ok, true);
         const update = {
             contentType: 'image',
             imageUrl: '/panorama-next.jpg',
@@ -1196,7 +1508,10 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
         const secondUploadUpdate = nextEvent(second.socket, 'content:update');
         const uploadResponse = await fetch(`${server.url}/api/upload`, {
             method: 'POST',
-            headers: { Origin: 'http://127.0.0.1:5173' },
+            headers: {
+                Origin: 'http://127.0.0.1:5173',
+                'X-Parallax-Controller': controllerSession.uploadToken
+            },
             body: formData
         });
         assert.equal(uploadResponse.status, 201);
@@ -1288,6 +1603,7 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
             imageForm.append('image', new Blob([imageBuffer], { type: mimeType }), `test.${extension}`);
             const imageResponse = await fetch(`${server.url}/api/upload`, {
                 method: 'POST',
+                headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
                 body: imageForm
             });
             assert.equal(imageResponse.status, 201);
@@ -1303,6 +1619,7 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
         invalidImageForm.append('image', new Blob(['not an image']), 'fake.png');
         const invalidImageResponse = await fetch(`${server.url}/api/upload`, {
             method: 'POST',
+            headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
             body: invalidImageForm
         });
         assert.equal(invalidImageResponse.status, 415);
@@ -1315,6 +1632,7 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
         );
         const oversizedResponse = await fetch(`${server.url}/api/upload`, {
             method: 'POST',
+            headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
             body: oversizedForm
         });
         assert.equal(oversizedResponse.status, 413);
@@ -1366,9 +1684,301 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
     }
 });
 
+test('uploads MP4 once, synchronizes playback, manages playlists, and resumes schedules after restart', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-media-integration-'));
+    let server = await startServer({ testDirectory });
+    const clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const controllerSession = await emitAck(controller, 'controller:register');
+        assert.equal(controllerSession.ok, true);
+        const unregisteredClient = await connectClient(server.url);
+        clients.push(unregisteredClient);
+        assert.equal((await emitAck(unregisteredClient, 'media:publish', {
+            mediaId: 'untrusted-media'
+        })).ok, false);
+        assert.equal((await emitAck(unregisteredClient, 'schedule:delete', {
+            id: 'untrusted-schedule'
+        })).ok, false);
+
+        const unauthorizedUpload = await fetch(`${server.url}/api/media/upload`, {
+            method: 'POST',
+            body: new FormData()
+        });
+        assert.equal(unauthorizedUpload.status, 401);
+
+        const invalidMediaForm = new FormData();
+        invalidMediaForm.append('media', new Blob(['not an MP4'], { type: 'video/mp4' }), 'bad.mp4');
+        const invalidMediaResponse = await fetch(`${server.url}/api/media/upload`, {
+            method: 'POST',
+            headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
+            body: invalidMediaForm
+        });
+        assert.equal(invalidMediaResponse.status, 415);
+
+        const makeMp4 = () => {
+            const buffer = Buffer.alloc(64);
+            buffer.writeUInt32BE(24, 0);
+            buffer.write('ftyp', 4);
+            buffer.write('isom', 8);
+            buffer.writeUInt32BE(0x200, 12);
+            buffer.write('isomiso2avc1mp41', 16);
+            return buffer;
+        };
+        async function uploadVideo(name) {
+            const form = new FormData();
+            form.append('media', new Blob([makeMp4()], { type: 'video/mp4' }), name);
+            form.append('durationSeconds', '30');
+            const response = await fetch(`${server.url}/api/media/upload`, {
+                method: 'POST',
+                headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
+                body: form
+            });
+            assert.equal(response.status, 201);
+            return response.json();
+        }
+        async function uploadImage(name) {
+            const buffer = await sharp({
+                create: {
+                    width: 8,
+                    height: 8,
+                    channels: 3,
+                    background: { r: 60, g: 90, b: 140 }
+                }
+            }).png().toBuffer();
+            const form = new FormData();
+            form.append('media', new Blob([buffer], { type: 'image/png' }), name);
+            const response = await fetch(`${server.url}/api/media/upload`, {
+                method: 'POST',
+                headers: { 'X-Parallax-Controller': controllerSession.uploadToken },
+                body: form
+            });
+            assert.equal(response.status, 201);
+            return response.json();
+        }
+
+        const firstVideo = await uploadVideo('first-panorama.mp4');
+        const secondVideo = await uploadVideo('second-panorama.mp4');
+        assert.equal(firstVideo.mediaType, 'video');
+        assert.equal(firstVideo.mimeType, 'video/mp4');
+        assert.equal(firstVideo.durationSeconds, 30);
+        assert.equal(firstVideo.published, false);
+        const videoPath = `${server.url}${new URL(firstVideo.url).pathname}`;
+        const localAddress = Object.values(networkInterfaces())
+            .flat()
+            .find((entry) => entry && !entry.internal && entry.family === 'IPv4')?.address;
+        const videoOrigin = localAddress
+            ? 'http://127.0.0.1:5173'
+            : 'http://localhost:5173';
+        const videoHeaders = {
+            Origin: videoOrigin,
+            ...(localAddress ? { Host: localAddress } : {})
+        };
+        const corsVideoResponse = await fetch(videoPath, {
+            method: 'HEAD',
+            headers: videoHeaders
+        });
+        assert.equal(corsVideoResponse.status, 200);
+        assert.equal(corsVideoResponse.headers.get('content-type'), 'video/mp4');
+        assert.equal(corsVideoResponse.headers.get('access-control-allow-origin'), videoOrigin);
+        const hostileVideoResponse = await fetch(videoPath, {
+            method: 'HEAD',
+            headers: { Origin: 'https://attacker.example' }
+        });
+        assert.equal(hostileVideoResponse.status, 403);
+        const first = await registerDevice(server.url, 'media-phone-one');
+        clients.push(first.socket);
+        const second = await registerDevice(server.url, 'media-phone-two');
+        clients.push(second.socket);
+
+        const firstContent = nextMatchingEvent(
+            first.socket,
+            'content:update',
+            (content) => content.mediaId === firstVideo.id
+        );
+        const secondContent = nextMatchingEvent(
+            second.socket,
+            'content:update',
+            (content) => content.mediaId === firstVideo.id
+        );
+        const published = await emitAck(controller, 'media:publish', {
+            mediaId: firstVideo.id,
+            transition: 'fade'
+        });
+        assert.equal(published.ok, true);
+        assert.equal((await firstContent).videoUrl, firstVideo.url);
+        assert.equal((await secondContent).videoUrl, firstVideo.url);
+        assert.equal(published.content.transition, 'fade');
+
+        const firstPlayTimeline = nextEvent(first.socket, 'playback:sync');
+        const secondPlayTimeline = nextEvent(second.socket, 'playback:sync');
+        const playing = await emitAck(controller, 'playback:play', {});
+        assert.equal(playing.ok, true);
+        const [firstTimeline, secondTimeline] = await Promise.all([
+            firstPlayTimeline,
+            secondPlayTimeline
+        ]);
+        assert.equal(firstTimeline.timelineId, secondTimeline.timelineId);
+        assert.equal(firstTimeline.startedAt, secondTimeline.startedAt);
+        assert.ok(firstTimeline.startedAt >= firstTimeline.serverNow);
+
+        const paused = await emitAck(controller, 'playback:pause', {});
+        assert.equal(paused.ok, true);
+        assert.equal(paused.playback.status, 'paused');
+        const resumed = await emitAck(controller, 'playback:resume', {});
+        assert.equal(resumed.ok, true);
+        assert.equal(resumed.playback.status, 'playing');
+        const seek = await emitAck(controller, 'playback:seek', { positionSeconds: 12 });
+        assert.equal(seek.ok, true);
+        assert.equal(seek.playback.positionSeconds, 12);
+
+        const driftCorrection = nextEvent(first.socket, 'playback:sync');
+        first.socket.emit('playback:drift', {
+            mediaId: firstVideo.id,
+            positionSeconds: 500
+        });
+        assert.equal((await driftCorrection).mediaId, firstVideo.id);
+
+        const createdPlaylist = await emitAck(controller, 'playlist:create', {
+            name: 'Video wall',
+            mediaType: 'video',
+            items: [
+                { mediaId: firstVideo.id, durationSeconds: 30 },
+                { mediaId: secondVideo.id, durationSeconds: 30 }
+            ],
+            loop: true,
+            shuffle: false,
+            transition: 'slide-left'
+        });
+        assert.equal(createdPlaylist.ok, true);
+        const playlist = createdPlaylist.playlist;
+        const reordered = await emitAck(controller, 'playlist:update', {
+            id: playlist.id,
+            name: playlist.name,
+            mediaType: playlist.mediaType,
+            items: [...playlist.items].reverse(),
+            loop: true,
+            shuffle: false,
+            transition: 'slide-right'
+        });
+        assert.equal(reordered.ok, true);
+        assert.deepEqual(reordered.playlist.items.map((item) => item.mediaId), [
+            secondVideo.id,
+            firstVideo.id
+        ]);
+        assert.equal(reordered.playlist.transition, 'slide-right');
+        const upcomingMedia = nextEvent(first.socket, 'media:preload');
+        const loaded = await emitAck(controller, 'playlist:load', { id: playlist.id });
+        assert.equal(loaded.ok, true);
+        assert.equal(loaded.playlistId, playlist.id);
+        assert.equal((await upcomingMedia).mediaId, firstVideo.id);
+        assert.equal((await emitAck(controller, 'playback:next', {})).ok, true);
+        assert.equal((await emitAck(controller, 'playback:stop', {})).ok, true);
+        assert.equal((await emitAck(controller, 'playlist:delete', { id: playlist.id })).ok, true);
+
+        const firstImage = await uploadImage('first-slide.png');
+        const secondImage = await uploadImage('second-slide.png');
+        const imagePlaylistResult = await emitAck(controller, 'playlist:create', {
+            name: 'Timed images',
+            mediaType: 'image',
+            items: [
+                { mediaId: firstImage.id, durationSeconds: 1 },
+                { mediaId: secondImage.id, durationSeconds: 1 }
+            ],
+            loop: false,
+            shuffle: false,
+            transition: 'fade'
+        });
+        assert.equal(imagePlaylistResult.ok, true);
+        const firstSlide = nextMatchingEvent(
+            first.socket,
+            'content:update',
+            (content) => content.mediaId === firstImage.id
+        );
+        const secondSlide = nextMatchingEvent(
+            first.socket,
+            'content:update',
+            (content) => content.mediaId === secondImage.id
+        );
+        assert.equal((await emitAck(controller, 'playlist:load', {
+            id: imagePlaylistResult.playlist.id
+        })).ok, true);
+        assert.equal((await firstSlide).mediaId, firstImage.id);
+        assert.equal((await secondSlide).mediaId, secondImage.id);
+        assert.equal((await emitAck(controller, 'playback:stop', {})).ok, true);
+        assert.equal((await emitAck(controller, 'playlist:delete', {
+            id: imagePlaylistResult.playlist.id
+        })).ok, true);
+
+        const startAt = new Date(Date.now() + 3000).toISOString();
+        const scheduleEnd = new Date(Date.now() + 30_000).toISOString();
+        const scheduleResult = await emitAck(controller, 'schedule:create', {
+            targetType: 'media',
+            targetId: secondVideo.id,
+            startAt,
+            endAt: scheduleEnd,
+            timeZone: 'Asia/Kolkata',
+            enabled: true
+        });
+        assert.equal(scheduleResult.ok, true);
+        assert.equal(scheduleResult.schedules.length, 1);
+        assert.equal(JSON.parse(await readFile(server.mediaManifestFile, 'utf8'))
+            .schedules[0].targetId, secondVideo.id);
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients.length = 0;
+        await server.close();
+        server = await startServer({ testDirectory });
+        const restoredController = await connectClient(server.url);
+        clients.push(restoredController);
+        const restoredSnapshot = nextEvent(restoredController, 'media:current');
+        const restoredRegistration = await emitAck(restoredController, 'controller:register');
+        assert.equal(restoredRegistration.ok, true);
+        const snapshot = await restoredSnapshot;
+        assert.equal(snapshot.media.length, 4);
+        assert.equal(snapshot.schedules.length, 1);
+
+        const restoredPhone = await registerDevice(server.url, 'media-phone-one');
+        clients.push(restoredPhone.socket);
+        const scheduledContent = nextMatchingEvent(
+            restoredPhone.socket,
+            'content:update',
+            (content) => content.mediaId === secondVideo.id
+        );
+        await scheduledContent;
+        const persistedManifest = JSON.parse(await readFile(server.mediaManifestFile, 'utf8'));
+        assert.equal(persistedManifest.activeScheduleId, scheduleResult.schedule.id);
+        assert.equal(persistedManifest.currentContent.mediaId, secondVideo.id);
+        assert.equal((await emitAck(restoredController, 'schedule:delete', {
+            id: scheduleResult.schedule.id
+        })).ok, true);
+        const deletedMedia = await emitAck(restoredController, 'media:delete', {
+            mediaId: firstVideo.id,
+            confirmPublished: true
+        });
+        assert.equal(deletedMedia.ok, true);
+        assert.equal(deletedMedia.media.media.length, 3);
+        assert.equal(deletedMedia.media.uploadHistory.find(
+            (entry) => entry.id === firstVideo.id
+        ).publishingStatus, 'deleted');
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
 test('uses a LAN-reachable image URL when uploads arrive through localhost', async () => {
     const server = await startServer({ publicBaseUrl: null });
+    const controller = await connectClient(server.url);
     try {
+        const controllerSession = await emitAck(controller, 'controller:register');
         const imageBuffer = await sharp({
             create: {
                 width: 2,
@@ -1382,7 +1992,10 @@ test('uses a LAN-reachable image URL when uploads arrive through localhost', asy
 
         const response = await fetch(`${server.url}/api/upload`, {
             method: 'POST',
-            headers: { Origin: 'http://localhost:5173' },
+            headers: {
+                Origin: 'http://localhost:5173',
+                'X-Parallax-Controller': controllerSession.uploadToken
+            },
             body: formData
         });
         assert.equal(response.status, 201);
@@ -1395,6 +2008,7 @@ test('uses a LAN-reachable image URL when uploads arrive through localhost', asy
         );
         assert.equal(reachableImage.status, 200);
     } finally {
+        controller.disconnect();
         await server.close();
     }
 });

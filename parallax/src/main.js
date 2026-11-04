@@ -1,6 +1,7 @@
 import { getOrCreateDeviceId } from './core/device.js';
 import { createParallaxSocket } from './core/socket.js';
 import { createContentRenderer } from './display/renderer.js';
+import { createDefaultLayout, validateDisplayLayout } from './display/geometry.js';
 import { mountController } from './controller/controller.js';
 import './styles/main.css';
 
@@ -32,6 +33,7 @@ function startDisplay() {
     let socket = null;
     let identifyOverlay = null;
     let identifyTimer = null;
+    let playbackDriftTimer = null;
     const alignmentByScreen = {
         1: { horizontal: 0, vertical: 0, scale: 1 },
         2: { horizontal: 0, vertical: 0, scale: 1 }
@@ -132,20 +134,36 @@ function startDisplay() {
                 onStatus: (message, state) => showStatus(message, state)
             });
             renderer.setScreenCount(totalScreens);
+            renderer.setLayout(assignment.layout ?? createDefaultLayout(totalScreens));
+            renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         } else {
             renderer.setScreenCount(totalScreens);
             renderer.setScreen(screen);
+            renderer.setLayout(assignment.layout ?? createDefaultLayout(totalScreens));
+            renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         }
         reportDeviceStatus();
+        if (playbackDriftTimer === null) {
+            playbackDriftTimer = setInterval(() => {
+                const report = renderer?.getPlaybackReport();
+                if (report && socket?.connected) {
+                    socket.emit('playback:drift', report);
+                }
+            }, 5000);
+        }
     }
 
     function handleUnassignment() {
         assignedScreen = null;
         display = null;
         renderer = null;
+        if (playbackDriftTimer !== null) {
+            clearInterval(playbackDriftTimer);
+            playbackDriftTimer = null;
+        }
         alignmentRevision = null;
         displayStatus = 'waiting';
         showStatus('Waiting for a screen assignment');
@@ -213,15 +231,16 @@ function startDisplay() {
         }, durationMs);
     });
 
-    socket.on('screen-config:update', (configuration) => {
+    function handleLayoutUpdate(configuration) {
         const count = configuration?.totalScreens;
-        if (!Number.isInteger(count) || count < 2 || count > 12) {
+        const nextLayout = configuration?.layout;
+        if (!Number.isInteger(count) || count < 2 || count > 12
+            || !validateDisplayLayout(nextLayout, count)) {
             return;
         }
         totalScreens = count;
-        const screens = configuration.screens;
-        if (screens && typeof screens === 'object') {
-            for (const [screenKey, settings] of Object.entries(screens)) {
+        if (configuration.screens && typeof configuration.screens === 'object') {
+            for (const [screenKey, settings] of Object.entries(configuration.screens)) {
                 const screen = Number(screenKey);
                 if (Number.isInteger(screen) && screen >= 1 && screen <= totalScreens
                     && Number.isFinite(settings?.horizontal)
@@ -234,12 +253,22 @@ function startDisplay() {
         if (renderer && assignedScreen) {
             try {
                 renderer.setScreenCount(totalScreens);
+                renderer.setLayout(nextLayout);
+                const enabled = nextLayout.screens[assignedScreen]?.enabled === true;
+                renderer.setScreenEnabled(enabled);
+                if (!enabled) {
+                    displayStatus = 'waiting';
+                    displayError = null;
+                }
                 renderer.setAlignment(alignmentByScreen[assignedScreen]);
+                reportDeviceStatus();
             } catch (error) {
                 showStatus(`Connection error: ${error.message}`, 'error');
             }
         }
-    });
+    }
+
+    socket.on('layout:update', handleLayoutUpdate);
 
     socket.on('content:update', (content) => {
         if (!renderer) {
@@ -248,6 +277,12 @@ function startDisplay() {
         }
         latestUpdateId = content?.updateId ?? null;
         renderer(content);
+    });
+    socket.on('media:preload', (media) => {
+        renderer?.preload(media);
+    });
+    socket.on('playback:sync', (timeline) => {
+        renderer?.setPlayback(timeline);
     });
     socket.on('calibration:update', (state) => {
     if (typeof state?.enabled !== 'boolean') {
@@ -341,5 +376,9 @@ function startDisplay() {
     window.addEventListener('pagehide', () => {
         socket.disconnect();
         clearTimeout(identifyTimer);
+        if (playbackDriftTimer !== null) {
+            clearInterval(playbackDriftTimer);
+        }
     }, { once: true });
+    window.addEventListener('orientationchange', () => renderer?.refresh(), { passive: true });
 }

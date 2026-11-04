@@ -3,21 +3,21 @@
   "totalScreens": 2,
   "assignmentMode": "manual",
   "assignments": {
-    "60f643f1-3382-40bb-8bda-52ba5f0bbc07": null,
-    "3f2e0ddb-c883-4527-96d3-20d3a88c59f1": 1,
+    "60f643f1-3382-40bb-8bda-52ba5f0bbc07": 2,
+    "3f2e0ddb-c883-4527-96d3-20d3a88c59f1": null,
     "2277ee97-fd39-42ef-997b-04c70e72dc9e": null,
-    "77f7649d-63db-4a40-9968-8c0444d010c2": 2
+    "77f7649d-63db-4a40-9968-8c0444d010c2": 1
   },
   "screens": {
     "1": {
-      "horizontal": 5,
-      "vertical": 33,
-      "scale": 1.04
+      "horizontal": 0,
+      "vertical": 0,
+      "scale": 0.95
     },
     "2": {
-      "horizontal": 24,
-      "vertical": -50,
-      "scale": 0.96
+      "horizontal": 0,
+      "vertical": 25,
+      "scale": 0.95
     },
     "3": {
       "horizontal": -23,
@@ -70,5 +70,27 @@
       "scale": 1
     }
   },
+  "layout": {
+    "type": "horizontal",
+    "rows": 1,
+    "columns": 2,
+    "screens": {
+      "1": {
+        "row": 0,
+        "column": 0,
+        "rotation": 0,
+        "orientation": "auto",
+        "enabled": true
+      },
+      "2": {
+        "row": 0,
+        "column": 1,
+        "rotation": 0,
+        "orientation": "auto",
+        "enabled": true
+      }
+    }
+  },
+  "layoutPresets": [],
   "presets": []
 }

@@ -1,10 +1,15 @@
 import { createParallaxSocket, getParallaxServerBaseUrl } from '../core/socket.js';
 import { formatAlignmentValue, getAlignmentStep } from './alignment-controls.js';
+import { confirmLayoutReset } from './layout-reset.js';
+import { createDefaultLayout, validateDisplayLayout } from '../display/geometry.js';
+import { expectedPlaybackPosition } from '../media/playback.js';
+import { synchronizePreviewVideo } from '../media/preview-sync.js';
 import QRCode from 'qrcode';
 import './controller.css';
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
-const ACCEPTED_EXTENSIONS = /\.(jpe?g|png|webp)$/i;
+const ACCEPTED_EXTENSIONS = /\.(jpe?g|png|webp|mp4)$/i;
+const MAX_VIDEO_FILE_SIZE = 100 * 1024 * 1024;
 
 export function mountController() {
     const root = document.querySelector('#app');
@@ -31,7 +36,7 @@ export function mountController() {
             <section class="controller-intro">
                 <p class="eyebrow">LIVE DISPLAY SYSTEM</p>
                 <h1>Control your panorama</h1>
-                <p>Upload an image and publish it across your connected screens.</p>
+                <p>Manage and publish synchronized panoramic media across your connected screens.</p>
             </section>
 
             <section class="controller-grid">
@@ -39,23 +44,24 @@ export function mountController() {
                     <div class="card-heading">
                         <div>
                             <p class="eyebrow">CONTENT</p>
-                            <h2>Publish an image</h2>
+                            <h2>Upload media</h2>
                         </div>
                         <span class="step-badge">01</span>
                     </div>
 
                     <label class="drop-zone" data-drop-zone>
-                        <input data-file-input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
+                        <input data-file-input type="file"
+                            accept=".jpg,.jpeg,.png,.webp,.mp4,image/jpeg,image/png,image/webp,video/mp4" hidden>
                         <span class="upload-icon" aria-hidden="true">↑</span>
-                        <strong data-drop-label>Drop an image here</strong>
-                        <span class="drop-hint">JPG, PNG or WebP · Up to 15 MB</span>
+                        <strong data-drop-label>Drop an image or MP4 video here</strong>
+                        <span class="drop-hint">JPG, PNG, WebP · 15 MB max | MP4 · 100 MB max</span>
                         <span class="browse-button">Browse files</span>
                     </label>
 
                     <div class="image-preview" data-image-preview>
                         <div class="preview-placeholder">
                             <span class="preview-placeholder-icon" aria-hidden="true">▧</span>
-                            <span>Your selected image preview will appear here</span>
+                            <span>Your selected media preview will appear here</span>
                         </div>
                     </div>
 
@@ -66,14 +72,14 @@ export function mountController() {
 
                     <div class="upload-progress" data-upload-progress hidden>
                         <div class="progress-label">
-                            <span data-progress-label>Uploading image</span>
+                            <span data-progress-label>Uploading media</span>
                             <span data-progress-value>0%</span>
                         </div>
                         <div class="progress-track"><span data-progress-bar></span></div>
                     </div>
 
                     <button class="publish-button" data-publish-button type="button" disabled>
-                        <span>Publish to displays</span><span aria-hidden="true">→</span>
+                        <span>Upload and publish</span><span aria-hidden="true">→</span>
                     </button>
                     <p class="publish-status" data-publish-status role="status" aria-live="polite"></p>
                 </div>
@@ -123,12 +129,112 @@ export function mountController() {
                             <span class="live-badge"><i></i> LIVE</span>
                         </div>
                         <div class="current-image" data-current-image>
-                            <div class="current-placeholder">No image published yet</div>
+                            <div class="current-placeholder">No media published yet</div>
                         </div>
                         <p class="current-content-name" data-current-name>Waiting for content</p>
                         <p class="current-content-meta" data-current-meta>Connect a display to get started</p>
                     </section>
                 </aside>
+            </section>
+
+            <section class="controller-card media-management" aria-labelledby="media-management-title">
+                <div class="card-heading">
+                    <div>
+                        <p class="eyebrow">CONTENT LIBRARY</p>
+                        <h2 id="media-management-title">Media management</h2>
+                    </div>
+                    <span class="status-badge" data-playback-status>Stopped</span>
+                </div>
+                <div class="media-library-toolbar">
+                    <label>Search library
+                        <input type="search" data-media-search placeholder="Filename">
+                    </label>
+                    <label>Media type
+                        <select data-media-filter>
+                            <option value="all">All media</option>
+                            <option value="image">Images</option>
+                            <option value="video">Videos</option>
+                        </select>
+                    </label>
+                    <label>Transition
+                        <select data-media-transition>
+                            <option value="none">No transition</option>
+                            <option value="fade">Fade</option>
+                            <option value="slide-left">Slide left</option>
+                            <option value="slide-right">Slide right</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="media-library" data-content-library>
+                    <p class="dashboard-empty-state">Uploaded media will appear here.</p>
+                </div>
+                <div class="media-history">
+                    <h3>Upload history</h3>
+                    <div data-upload-history><p class="dashboard-empty-state">No uploads yet.</p></div>
+                </div>
+                <div class="media-playlists">
+                    <h3>Image and video playlists</h3>
+                    <div class="playlist-editor">
+                        <label>Playlist name
+                            <input type="text" maxlength="64" data-playlist-name placeholder="Playlist name">
+                        </label>
+                        <label>Playlist type
+                            <select data-playlist-type>
+                                <option value="image">Images</option>
+                                <option value="video">Videos</option>
+                            </select>
+                        </label>
+                        <label>Image duration (seconds)
+                            <input type="number" min="1" max="86400" value="8" data-playlist-duration>
+                        </label>
+                        <label class="playlist-option"><input type="checkbox" data-playlist-loop checked> Loop playlist</label>
+                        <label class="playlist-option"><input type="checkbox" data-playlist-shuffle> Shuffle</label>
+                        <label>Saved playlists
+                            <select data-playlist-select></select>
+                        </label>
+                        <button class="alignment-action" type="button" data-playlist-new>New playlist</button>
+                        <button class="alignment-action" type="button" data-playlist-save>Create playlist</button>
+                        <button class="alignment-action" type="button" data-playlist-load>Load playlist</button>
+                        <button class="alignment-action is-danger" type="button" data-playlist-delete>Delete playlist</button>
+                        <button class="alignment-action" type="button" data-playlist-preview>Preview playlist</button>
+                    </div>
+                    <div class="playlist-draft" data-playlist-draft>
+                        <p class="dashboard-empty-state">Add media from the library to build a playlist.</p>
+                    </div>
+                </div>
+                <div class="playback-controls">
+                    <h3>Playback controls</h3>
+                    <div class="playback-buttons">
+                        <button class="alignment-action" type="button" data-playback-previous>Previous</button>
+                        <button class="alignment-action" type="button" data-playback-play>Play</button>
+                        <button class="alignment-action" type="button" data-playback-pause>Pause</button>
+                        <button class="alignment-action" type="button" data-playback-resume>Resume</button>
+                        <button class="alignment-action" type="button" data-playback-stop>Stop</button>
+                        <button class="alignment-action" type="button" data-playback-next>Next</button>
+                    </div>
+                    <label class="playback-seek">Position
+                        <input type="range" min="0" max="0" step="0.1" value="0" data-playback-seek disabled>
+                        <span data-playback-position>0:00</span>
+                    </label>
+                </div>
+                <div class="schedule-controls">
+                    <h3>Scheduled playback</h3>
+                    <label>Media or playlist
+                        <select data-schedule-target></select>
+                    </label>
+                    <label>Start
+                        <input type="datetime-local" data-schedule-start>
+                    </label>
+                    <label>End
+                        <input type="datetime-local" data-schedule-end>
+                    </label>
+                    <label>Time zone
+                        <input type="text" data-schedule-timezone readonly>
+                    </label>
+                    <button class="alignment-action" type="button" data-schedule-create>Create schedule</button>
+                    <div class="schedule-list" data-schedule-list></div>
+                </div>
+                <p class="alignment-status" data-media-status role="status" aria-live="polite"></p>
             </section>
 
             <section class="controller-card panorama-dashboard" aria-labelledby="dashboard-title">
@@ -143,6 +249,7 @@ export function mountController() {
                     </div>
                 </div>
                 <p class="card-description">Drag a connected device onto a screen to assign it. You can also use each screen's assignment menu.</p>
+                <p class="layout-warning" data-layout-warning hidden></p>
                 <div class="panorama-wall" data-panorama-wall aria-label="Panorama screen assignments"></div>
                 <div class="panorama-preview-wrap">
                     <div class="panorama-preview-heading">
@@ -150,7 +257,7 @@ export function mountController() {
                         <span data-dashboard-content-status>Waiting for content</span>
                     </div>
                     <div class="panorama-preview" data-panorama-preview>
-                        <p class="dashboard-empty-state">Publish an image to preview the complete panorama.</p>
+                        <p class="dashboard-empty-state">Publish media to preview the complete panorama.</p>
                     </div>
                 </div>
                 <div class="dashboard-devices-wrap">
@@ -163,6 +270,50 @@ export function mountController() {
                     </div>
                 </div>
                 <p class="dashboard-status" data-dashboard-status role="status" aria-live="polite"></p>
+            </section>
+
+            <section class="controller-card layout-config-card" aria-labelledby="layout-config-title">
+                <div class="card-heading">
+                    <div>
+                        <p class="eyebrow">DISPLAY GEOMETRY</p>
+                        <h2 id="layout-config-title">Display layout</h2>
+                    </div>
+                </div>
+                <p class="card-description">
+                    Screen cells map to equal normalized regions of the panorama. Empty cells in a custom layout represent image regions with no assigned display.
+                </p>
+                <div class="layout-config-controls">
+                    <label>Layout type
+                        <select data-layout-type disabled>
+                            <option value="horizontal">Horizontal</option>
+                            <option value="vertical">Vertical</option>
+                            <option value="grid">Grid</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </label>
+                    <label>Rows
+                        <input type="number" min="1" max="12" value="1" data-layout-rows disabled>
+                    </label>
+                    <label>Columns
+                        <input type="number" min="1" max="12" value="2" data-layout-columns disabled>
+                    </label>
+                    <button class="alignment-action" type="button" data-layout-apply disabled>Apply Layout</button>
+                    <button class="alignment-action is-warning" type="button" data-layout-reset disabled>
+                        ↺ Reset to Default
+                    </button>
+                </div>
+                <div class="layout-preset-controls">
+                    <label>Save layout preset
+                        <input type="text" maxlength="32" data-layout-preset-name placeholder="Layout name">
+                    </label>
+                    <button class="alignment-action" type="button" data-layout-preset-save disabled>Save layout</button>
+                    <label>Load layout
+                        <select data-layout-preset-select disabled></select>
+                    </label>
+                    <button class="alignment-action" type="button" data-layout-preset-load disabled>Load layout</button>
+                    <button class="alignment-action is-danger" type="button" data-layout-preset-delete disabled>Delete layout</button>
+                </div>
+                <p class="alignment-status" data-layout-status role="status" aria-live="polite">Waiting for display layout.</p>
             </section>
 
             <section class="controller-card calibration-card">
@@ -280,7 +431,7 @@ export function mountController() {
 
             <footer class="controller-footer">
                 <span>PARALLAX · Synchronized panoramic display</span>
-                <span>Images are limited to 15 MB</span>
+                <span>Images up to 15 MB · MP4 videos up to 100 MB</span>
             </footer>
         </main>
     `;
@@ -290,6 +441,32 @@ export function mountController() {
     const dropLabel = root.querySelector('[data-drop-label]');
     const preview = root.querySelector('[data-image-preview]');
     const fileDetails = root.querySelector('[data-file-details]');
+    const contentLibrary = root.querySelector('[data-content-library]');
+    const uploadHistory = root.querySelector('[data-upload-history]');
+    const mediaSearch = root.querySelector('[data-media-search]');
+    const mediaFilter = root.querySelector('[data-media-filter]');
+    const mediaTransition = root.querySelector('[data-media-transition]');
+    const playlistNameInput = root.querySelector('[data-playlist-name]');
+    const playlistTypeSelect = root.querySelector('[data-playlist-type]');
+    const playlistDurationInput = root.querySelector('[data-playlist-duration]');
+    const playlistLoopInput = root.querySelector('[data-playlist-loop]');
+    const playlistShuffleInput = root.querySelector('[data-playlist-shuffle]');
+    const playlistSelect = root.querySelector('[data-playlist-select]');
+    const playlistNewButton = root.querySelector('[data-playlist-new]');
+    const playlistSaveButton = root.querySelector('[data-playlist-save]');
+    const playlistLoadButton = root.querySelector('[data-playlist-load]');
+    const playlistDeleteButton = root.querySelector('[data-playlist-delete]');
+    const playlistPreviewButton = root.querySelector('[data-playlist-preview]');
+    const playlistDraftElement = root.querySelector('[data-playlist-draft]');
+    const playbackStatus = root.querySelector('[data-playback-status]');
+    const playbackSeek = root.querySelector('[data-playback-seek]');
+    const playbackPosition = root.querySelector('[data-playback-position]');
+    const scheduleTarget = root.querySelector('[data-schedule-target]');
+    const scheduleStart = root.querySelector('[data-schedule-start]');
+    const scheduleEnd = root.querySelector('[data-schedule-end]');
+    const scheduleTimezone = root.querySelector('[data-schedule-timezone]');
+    const scheduleList = root.querySelector('[data-schedule-list]');
+    const mediaStatus = root.querySelector('[data-media-status]');
     const publishButton = root.querySelector('[data-publish-button]');
     const publishStatus = root.querySelector('[data-publish-status]');
     const progress = root.querySelector('[data-upload-progress]');
@@ -314,6 +491,18 @@ export function mountController() {
     const dashboardPreview = root.querySelector('[data-panorama-preview]');
     const dashboardDevices = root.querySelector('[data-dashboard-devices]');
     const dashboardStatus = root.querySelector('[data-dashboard-status]');
+    const layoutWarning = root.querySelector('[data-layout-warning]');
+    const layoutTypeSelect = root.querySelector('[data-layout-type]');
+    const layoutRowsInput = root.querySelector('[data-layout-rows]');
+    const layoutColumnsInput = root.querySelector('[data-layout-columns]');
+    const layoutApplyButton = root.querySelector('[data-layout-apply]');
+    const layoutPresetNameInput = root.querySelector('[data-layout-preset-name]');
+    const layoutPresetSelect = root.querySelector('[data-layout-preset-select]');
+    const layoutPresetSaveButton = root.querySelector('[data-layout-preset-save]');
+    const layoutPresetLoadButton = root.querySelector('[data-layout-preset-load]');
+    const layoutPresetDeleteButton = root.querySelector('[data-layout-preset-delete]');
+    const layoutResetButton = root.querySelector('[data-layout-reset]');
+    const layoutStatus = root.querySelector('[data-layout-status]');
     const diagnosticsScreens = root.querySelector('[data-diagnostics-screens]');
     const addDeviceButton = root.querySelector('[data-add-device]');
     const pairingDialog = root.querySelector('[data-pairing-dialog]');
@@ -331,6 +520,8 @@ export function mountController() {
     const socket = createParallaxSocket();
 
     let selectedFile = null;
+    let selectedMediaDuration = null;
+    let controllerUploadToken = null;
     let previewUrl = null;
     let uploadRequest = null;
     let calibrationEnabled = false;
@@ -338,6 +529,20 @@ export function mountController() {
     let assignmentMode = 'automatic';
     let registeredDevices = [];
     let panoramaImageUrl = null;
+    let panoramaMediaType = 'image';
+    let displayLayout = createDefaultLayout(2);
+    let layoutPresets = [];
+    let mediaLibrary = [];
+    let mediaUploadHistory = [];
+    const mediaThumbnails = new Map();
+    let mediaPlaylists = [];
+    let mediaSchedules = [];
+    let currentMediaId = null;
+    let currentPlayback = null;
+    let previewServerTimeOffset = 0;
+    let previewSyncTimer = null;
+    let lastPreviewPlaybackError = null;
+    let playlistDraft = [];
     let pairingSession = null;
     let pairingCountdownTimer = null;
     let knownDeviceIds = null;
@@ -360,14 +565,20 @@ export function mountController() {
 
     function renderDashboardScreens() {
         root.querySelector('[data-dashboard-screen-count]').textContent = String(totalScreens);
-        const connectedCount = registeredDevices.filter((device) => device.connected).length;
+        const connectedCount = registeredDevices.filter((device) =>
+            device.connected && device.enabled !== false).length;
         root.querySelector('[data-dashboard-device-count]').textContent = String(connectedCount);
-        dashboardWall.style.setProperty('--screen-count', String(totalScreens));
+        dashboardWall.style.gridTemplateColumns =
+            `repeat(${displayLayout.columns}, minmax(180px, 1fr))`;
+        dashboardWall.style.gridTemplateRows =
+            `repeat(${displayLayout.rows}, minmax(0, auto))`;
         dashboardWall.innerHTML = Array.from({ length: totalScreens }, (_, index) => {
             const screen = index + 1;
             const device = registeredDevices.find((entry) => entry.screen === screen);
-            const connected = Boolean(device?.connected);
-            const status = !device ? 'Unassigned' : connected ? 'Online' : 'Offline';
+            const geometry = displayLayout.screens[screen];
+            const enabled = geometry.enabled;
+            const connected = Boolean(device?.connected && enabled);
+            const status = !enabled ? 'Disabled' : !device ? 'Unassigned' : connected ? 'Online' : 'Offline';
             const settings = alignmentByScreen[screen];
             const displayStatus = diagnostics?.devices?.find((entry) => entry.screen === screen);
             const assignmentOptions = [
@@ -379,8 +590,9 @@ export function mountController() {
                 `)
             ].join('');
             return `
-                <article class="dashboard-screen-card ${connected ? 'is-online' : device ? 'is-offline' : 'is-unassigned'}"
-                    data-dashboard-screen="${screen}">
+                <article class="dashboard-screen-card ${connected ? 'is-online' : !enabled ? 'is-disabled' : device ? 'is-offline' : 'is-unassigned'}"
+                    data-dashboard-screen="${screen}" data-screen-number="${screen}"
+                    style="grid-row:${geometry.row + 1};grid-column:${geometry.column + 1}" draggable="true">
                     <div class="dashboard-screen-heading">
                         <span class="dashboard-screen-number">SCREEN ${screen}</span>
                         <span class="dashboard-status-pill"><i></i>${status}</span>
@@ -388,7 +600,8 @@ export function mountController() {
                     <p class="dashboard-screen-device">${device ? escapeHtml(device.id) : 'No device assigned'}</p>
                     <p class="dashboard-device-name">${device ? 'Name not reported' : 'Waiting for a device'}</p>
                     <label class="dashboard-assignment-control">Assign device
-                        <select data-screen-assignment="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                        <select data-screen-assignment="${screen}"
+                            ${!socket.connected || !enabled ? 'disabled' : ''}>
                             ${assignmentOptions}
                         </select>
                     </label>
@@ -419,25 +632,53 @@ export function mountController() {
                             Reset alignment
                         </button>
                     </div>
+                    <div class="screen-geometry-controls">
+                        <label>Row<input type="number" min="0" max="11" value="${geometry.row}"
+                            data-screen-position="${screen}" data-position-axis="row" ${!socket.connected ? 'disabled' : ''}></label>
+                        <label>Column<input type="number" min="0" max="11" value="${geometry.column}"
+                            data-screen-position="${screen}" data-position-axis="column" ${!socket.connected ? 'disabled' : ''}></label>
+                        <label>Rotation<select data-screen-rotation="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                            ${[0, 90, 180, 270].map((degrees) =>
+                                `<option value="${degrees}" ${geometry.rotation === degrees ? 'selected' : ''}>${degrees}°</option>`).join('')}
+                        </select></label>
+                        <label>Orientation<select data-screen-orientation="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                            ${[['auto', 'Auto'], ['portrait', 'Portrait'], ['landscape', 'Landscape']]
+                                .map(([value, name]) =>
+                                    `<option value="${value}" ${geometry.orientation === value ? 'selected' : ''}>${name}</option>`).join('')}
+                        </select></label>
+                        <label class="screen-enabled-control"><input type="checkbox" data-screen-enabled="${screen}"
+                            ${enabled ? 'checked' : ''} ${!socket.connected ? 'disabled' : ''}> Enabled</label>
+                    </div>
                 </article>
             `;
         }).join('');
+        layoutTypeSelect.value = displayLayout.type;
+        layoutRowsInput.value = String(displayLayout.rows);
+        layoutColumnsInput.value = String(displayLayout.columns);
+        layoutRowsInput.disabled = !socket.connected || displayLayout.type === 'horizontal';
+        layoutColumnsInput.disabled = !socket.connected || displayLayout.type === 'vertical';
+        layoutTypeSelect.disabled = !socket.connected;
+        layoutApplyButton.disabled = !socket.connected;
+        layoutResetButton.disabled = !socket.connected;
+        layoutWarning.hidden = validateDisplayLayout(displayLayout, totalScreens);
+        layoutWarning.textContent = layoutWarning.hidden ? '' :
+            'Invalid screen geometry: correct out-of-bounds or overlapping screen positions before applying.';
     }
 
     function renderDashboardDevices() {
         dashboardDevices.innerHTML = registeredDevices.length
             ? registeredDevices.map((device) => {
                 const report = diagnostics?.devices?.find((entry) => entry.deviceId === device.id);
-                const status = device.connected ? 'Online' : 'Offline';
+                const status = device.enabled === false ? 'Disabled' : device.connected ? 'Online' : 'Offline';
                 return `
-                    <article class="dashboard-device-card ${device.connected ? 'is-online' : 'is-offline'}"
+                    <article class="dashboard-device-card ${device.enabled === false ? 'is-disabled' : device.connected ? 'is-online' : 'is-offline'}"
                         data-device-card="${escapeHtml(device.id)}" draggable="true">
                         <div class="dashboard-device-card-heading">
                             <strong>${escapeHtml(device.id)}</strong>
                             <span class="dashboard-status-pill"><i></i>${status}</span>
                         </div>
                         <p>Name: Not reported</p>
-                        <p>Assigned screen: ${Number.isInteger(device.screen) ? `Screen ${device.screen}` : 'Unassigned'}</p>
+                        <p>Assigned screen: ${Number.isInteger(device.screen) ? `Screen ${device.screen}${device.enabled === false ? ' · disabled' : ''}` : 'Unassigned'}</p>
                         <p>Last activity: ${formatTimestamp(report?.lastActivity)}</p>
                         <p>Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'}</p>
                         <p>Alignment delivery: ${
@@ -458,7 +699,7 @@ export function mountController() {
                             </select>
                         </label>
                         <button type="button" class="dashboard-identify-button" data-device-identify="${escapeHtml(device.id)}"
-                            ${!device.connected || !Number.isInteger(device.screen) ? 'disabled' : ''}>
+                            ${!device.connected || device.enabled === false || !Number.isInteger(device.screen) ? 'disabled' : ''}>
                             Identify device
                         </button>
                     </article>
@@ -472,35 +713,143 @@ export function mountController() {
         if (!panoramaImageUrl) {
             previewStatus.textContent = 'Waiting for content';
             dashboardPreview.innerHTML =
-                '<p class="dashboard-empty-state">Publish an image to preview the complete panorama.</p>';
+                '<p class="dashboard-empty-state">Publish media to preview the complete panorama.</p>';
             return;
         }
-        previewStatus.textContent = 'Latest published image';
-        dashboardPreview.style.setProperty('--screen-count', String(totalScreens));
-        dashboardPreview.replaceChildren();
+        previewStatus.textContent = panoramaMediaType === 'video'
+            ? 'Latest published video'
+            : 'Latest published image';
+        dashboardPreview.style.gridTemplateColumns =
+            `repeat(${displayLayout.columns}, minmax(0, 1fr))`;
+        dashboardPreview.style.gridTemplateRows =
+            `repeat(${displayLayout.rows}, minmax(70px, 1fr))`;
+        dashboardPreview.style.aspectRatio = `${displayLayout.columns} / ${displayLayout.rows}`;
+        const mediaTag = panoramaMediaType === 'video' ? 'video' : 'img';
+        let panorama = dashboardPreview.querySelector('.panorama-preview-image');
+        if (!panorama || panorama.tagName.toLowerCase() !== mediaTag
+            || panorama.src !== new URL(panoramaImageUrl, window.location.href).href) {
+            panorama = document.createElement(mediaTag);
+            panorama.className = 'panorama-preview-image';
+            if (panoramaMediaType === 'video') {
+                panorama.muted = true;
+                panorama.controls = false;
+                panorama.preload = 'auto';
+                panorama.playsInline = true;
+                panorama.addEventListener('loadedmetadata', synchronizePublishedPreviewVideos);
+                panorama.addEventListener('loadeddata', synchronizePublishedPreviewVideos);
+            } else {
+                panorama.alt = 'Complete published panorama';
+            }
+            panorama.src = panoramaImageUrl;
+            dashboardPreview.replaceChildren(panorama);
+        }
+        for (const segment of dashboardPreview.querySelectorAll('.panorama-preview-segment')) {
+            segment.remove();
+        }
         for (let index = 0; index < totalScreens; index += 1) {
             const screen = index + 1;
-            const image = document.createElement('img');
-            image.src = panoramaImageUrl;
-            image.alt = '';
-            image.draggable = false;
-            image.style.width = `${totalScreens * 100}%`;
-            image.style.left = `-${(screen - 1) * 100}%`;
+            const geometry = displayLayout.screens[screen];
+            const device = registeredDevices.find((entry) => entry.screen === screen);
             const segment = document.createElement('div');
             segment.className = 'panorama-preview-segment';
             segment.setAttribute('aria-label', `Screen ${screen} preview`);
-            segment.append(image);
+            segment.style.gridRow = String(geometry.row + 1);
+            segment.style.gridColumn = String(geometry.column + 1);
+            segment.classList.toggle('is-disabled', !geometry.enabled);
             const label = document.createElement('span');
             label.className = 'panorama-preview-label';
-            label.textContent = `SCREEN ${screen}`;
+            label.textContent = `SCREEN ${screen} · ${device?.id ?? 'Unassigned'} · ${geometry.rotation}°`;
             segment.append(label);
+            if (!geometry.enabled) {
+                const disabled = document.createElement('span');
+                disabled.className = 'panorama-preview-disabled';
+                disabled.textContent = 'DISABLED';
+                segment.append(disabled);
+            }
             dashboardPreview.append(segment);
         }
+        synchronizePublishedPreviewVideos();
     }
 
     function renderDashboard() {
         renderDashboardScreens();
         renderDashboardDevices();
+    }
+
+    function setDisplayLayout(nextLayout, { render = true } = {}) {
+        if (!validateDisplayLayout(nextLayout, totalScreens)) {
+            layoutWarning.hidden = false;
+            layoutWarning.textContent =
+                'Invalid screen geometry: correct out-of-bounds or overlapping screen positions before applying.';
+            return false;
+        }
+        displayLayout = {
+            type: nextLayout.type,
+            rows: nextLayout.rows,
+            columns: nextLayout.columns,
+            screens: Object.fromEntries(Object.entries(nextLayout.screens)
+                .map(([screen, geometry]) => [screen, { ...geometry }]))
+        };
+        layoutWarning.hidden = true;
+        if (render) {
+            renderDashboardScreens();
+            renderPanoramaPreview();
+        }
+        return true;
+    }
+
+    function setLayoutPresets(nextPresets) {
+        if (!Array.isArray(nextPresets)
+            || nextPresets.some((preset) => typeof preset?.name !== 'string'
+                || !Number.isInteger(preset.totalScreens)
+                || !validateDisplayLayout(preset.layout, preset.totalScreens))) {
+            return;
+        }
+        layoutPresets = nextPresets;
+        const selected = layoutPresetSelect.value;
+        layoutPresetSelect.replaceChildren();
+        for (const preset of layoutPresets) {
+            const option = document.createElement('option');
+            option.value = preset.name;
+            option.textContent = `${preset.name} · ${preset.totalScreens} screens`;
+            layoutPresetSelect.append(option);
+        }
+        layoutPresetSelect.value = layoutPresets.some((preset) => preset.name === selected)
+            ? selected
+            : layoutPresets[0]?.name ?? '';
+        const selectedPreset = layoutPresets.find((preset) => preset.name === layoutPresetSelect.value);
+        layoutPresetSelect.disabled = !socket.connected || !selectedPreset;
+        layoutPresetLoadButton.disabled = !socket.connected || !selectedPreset;
+        layoutPresetDeleteButton.disabled = !socket.connected
+            || !selectedPreset || selectedPreset.isDefault;
+        layoutPresetSaveButton.disabled = !socket.connected;
+    }
+
+    function sendLayout(nextLayout, successMessage = 'Display layout saved.') {
+        if (!validateDisplayLayout(nextLayout, totalScreens)) {
+            layoutStatus.textContent =
+                'Invalid layout: screen positions must be unique and within the configured rows and columns.';
+            layoutStatus.classList.add('is-error');
+            layoutWarning.hidden = false;
+            layoutWarning.textContent = layoutStatus.textContent;
+            return;
+        }
+        layoutWarning.hidden = true;
+        layoutStatus.textContent = 'Saving display layout...';
+        layoutStatus.classList.remove('is-error');
+        socket.timeout(5000).emit('layout:set', { layout: nextLayout }, (error, response) => {
+            if (error || !response?.ok) {
+                layoutStatus.textContent = error
+                    ? 'The server did not acknowledge the layout update.'
+                    : response?.message || 'Unable to save display layout.';
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+            totalScreens = response.totalScreens;
+            setDisplayLayout(response.layout);
+            layoutStatus.textContent = successMessage;
+            layoutStatus.classList.remove('is-error');
+        });
     }
 
     function renderScreenPanels() {
@@ -894,6 +1243,12 @@ export function mountController() {
         }
         totalScreens = configuration.totalScreens;
         assignmentMode = configuration.assignmentMode;
+        const nextLayout = configuration.layout ?? createDefaultLayout(totalScreens);
+        if (!setDisplayLayout(nextLayout, { render: false })) {
+            layoutWarning.hidden = false;
+            layoutWarning.textContent = 'The server returned invalid display geometry. The existing layout was kept.';
+            return;
+        }
         if (configuration.screens && typeof configuration.screens === 'object') {
             for (const screen of Object.keys(alignmentByScreen)) {
                 const settings = configuration.screens[screen];
@@ -907,6 +1262,9 @@ export function mountController() {
         }
         renderScreenPanels();
         renderPanoramaPreview();
+        layoutStatus.textContent = `Layout synchronized (${displayLayout.type}, ${displayLayout.rows} × ${displayLayout.columns}).`;
+        layoutStatus.classList.remove('is-error');
+        setLayoutPresets(layoutPresets);
         screenConfigSaveButton.disabled = !socket.connected;
         assignmentModeSelect.disabled = !socket.connected;
         screenCountSelect.disabled = !socket.connected;
@@ -935,6 +1293,150 @@ export function mountController() {
                 `Configuration saved: ${response.totalScreens} screens, ${response.assignmentMode} assignment.`;
             applyScreenConfiguration(response);
         });
+    });
+
+    layoutTypeSelect.addEventListener('change', () => {
+        const type = layoutTypeSelect.value;
+        if (type === 'horizontal') {
+            layoutRowsInput.value = '1';
+            layoutColumnsInput.value = String(totalScreens);
+        } else if (type === 'vertical') {
+            layoutRowsInput.value = String(totalScreens);
+            layoutColumnsInput.value = '1';
+        } else if (type === 'grid') {
+            const columns = Math.ceil(Math.sqrt(totalScreens));
+            layoutColumnsInput.value = String(columns);
+            layoutRowsInput.value = String(Math.ceil(totalScreens / columns));
+        } else {
+            layoutRowsInput.value = String(displayLayout.rows);
+            layoutColumnsInput.value = String(displayLayout.columns);
+        }
+        layoutRowsInput.disabled = type === 'horizontal';
+        layoutColumnsInput.disabled = type === 'vertical';
+    });
+
+    layoutApplyButton.addEventListener('click', () => {
+        const type = layoutTypeSelect.value;
+        const rows = Number(layoutRowsInput.value);
+        const columns = Number(layoutColumnsInput.value);
+        let nextLayout;
+        if (type === 'custom') {
+            nextLayout = {
+                ...displayLayout,
+                type,
+                rows,
+                columns,
+                screens: Object.fromEntries(Object.entries(displayLayout.screens)
+                    .map(([screen, geometry]) => [screen, { ...geometry }]))
+            };
+        } else {
+            try {
+                nextLayout = createDefaultLayout(totalScreens, type, rows, columns);
+                for (let screen = 1; screen <= totalScreens; screen += 1) {
+                    nextLayout.screens[screen] = {
+                        ...nextLayout.screens[screen],
+                        rotation: displayLayout.screens[screen].rotation,
+                        orientation: displayLayout.screens[screen].orientation,
+                        enabled: displayLayout.screens[screen].enabled
+                    };
+                }
+            } catch (error) {
+                layoutStatus.textContent = error.message;
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+        }
+        sendLayout(nextLayout);
+    });
+
+    layoutResetButton.addEventListener('click', () => {
+        confirmLayoutReset(
+            (message) => window.confirm(message),
+            () => {
+                layoutStatus.textContent = 'Resetting display layout...';
+                layoutStatus.classList.remove('is-error');
+                socket.timeout(5000).emit('layout:reset', {}, (error, response) => {
+                    if (error || !response?.ok) {
+                        layoutStatus.textContent = error
+                            ? 'The server did not acknowledge the layout reset.'
+                            : response?.message || 'Unable to reset display layout.';
+                        layoutStatus.classList.add('is-error');
+                        return;
+                    }
+                    totalScreens = response.totalScreens;
+                    setDisplayLayout(response.layout);
+                    layoutRowsInput.value = String(response.layout.rows);
+                    layoutColumnsInput.value = String(response.layout.columns);
+                    layoutStatus.textContent = 'Display layout reset to the default horizontal arrangement.';
+                    layoutStatus.classList.remove('is-error');
+                });
+            }
+        );
+    });
+
+    layoutPresetSaveButton.addEventListener('click', () => {
+        socket.timeout(5000).emit('layout-presets:save', {
+            name: layoutPresetNameInput.value
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                layoutStatus.textContent = error
+                    ? 'The server did not acknowledge the layout preset.'
+                    : response?.message || 'Unable to save layout preset.';
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+            setLayoutPresets(response.presets);
+            layoutStatus.textContent = `Layout "${layoutPresetNameInput.value.trim()}" saved.`;
+            layoutStatus.classList.remove('is-error');
+            layoutPresetNameInput.value = '';
+        });
+    });
+    layoutPresetLoadButton.addEventListener('click', () => {
+        socket.timeout(5000).emit('layout-presets:load', {
+            name: layoutPresetSelect.value
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                layoutStatus.textContent = error
+                    ? 'The server did not acknowledge the layout preset.'
+                    : response?.message || 'Unable to load layout preset.';
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+            totalScreens = response.totalScreens;
+            screenCountSelect.value = String(totalScreens);
+            layoutRowsInput.value = String(response.layout.rows);
+            layoutColumnsInput.value = String(response.layout.columns);
+            setDisplayLayout(response.layout);
+            layoutStatus.textContent = `Layout "${response.name}" loaded.`;
+            layoutStatus.classList.remove('is-error');
+        });
+    });
+    layoutPresetDeleteButton.addEventListener('click', () => {
+        const name = layoutPresetSelect.value;
+        const selected = layoutPresets.find((preset) => preset.name === name);
+        if (!selected || selected.isDefault) {
+            return;
+        }
+        if (!window.confirm(`Delete the "${name}" layout preset? Current layout will not change.`)) {
+            return;
+        }
+        socket.timeout(5000).emit('layout-presets:delete', { name }, (error, response) => {
+            if (error || !response?.ok) {
+                layoutStatus.textContent = error
+                    ? 'The server did not acknowledge layout preset deletion.'
+                    : response?.message || 'Unable to delete layout preset.';
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+            setLayoutPresets(response.presets);
+            layoutStatus.textContent = `Layout "${name}" deleted. Current layout was not changed.`;
+            layoutStatus.classList.remove('is-error');
+        });
+    });
+    layoutPresetSelect.addEventListener('change', () => {
+        const selected = layoutPresets.find((preset) => preset.name === layoutPresetSelect.value);
+        layoutPresetLoadButton.disabled = !socket.connected || !selected;
+        layoutPresetDeleteButton.disabled = !socket.connected || !selected || selected.isDefault;
     });
 
     deviceAssignmentList.addEventListener('change', (event) => {
@@ -1038,13 +1540,101 @@ export function mountController() {
     });
     dashboardWall.addEventListener('drop', (event) => {
         const card = event.target.closest('[data-dashboard-screen]');
-        const deviceId = event.dataTransfer?.getData('text/plain');
-        if (!card || !deviceId) {
+        if (!card || !event.dataTransfer) {
             return;
         }
         event.preventDefault();
         card.classList.remove('is-drop-target');
-        requestDeviceAssignment(deviceId, Number(card.dataset.dashboardScreen));
+        const draggedScreen = Number(event.dataTransfer.getData('application/x-parallax-screen'));
+        const targetScreen = Number(card.dataset.dashboardScreen);
+        if (Number.isInteger(draggedScreen) && draggedScreen !== targetScreen) {
+            const nextLayout = {
+                ...displayLayout,
+                screens: Object.fromEntries(Object.entries(displayLayout.screens)
+                    .map(([screen, geometry]) => [screen, { ...geometry }]))
+            };
+            const first = nextLayout.screens[draggedScreen];
+            const second = nextLayout.screens[targetScreen];
+            [first.row, second.row] = [second.row, first.row];
+            [first.column, second.column] = [second.column, first.column];
+            nextLayout.type = 'custom';
+            sendLayout(nextLayout, `Screen ${draggedScreen} moved to Screen ${targetScreen}'s position.`);
+            return;
+        }
+        const deviceId = event.dataTransfer.getData('text/plain');
+        if (deviceId) {
+            requestDeviceAssignment(deviceId, targetScreen);
+        }
+    });
+
+    dashboardWall.addEventListener('dragstart', (event) => {
+        const card = event.target.closest('[data-screen-number]');
+        if (!card || !event.dataTransfer || event.target.closest('input, select, button')) {
+            event.preventDefault();
+            return;
+        }
+        event.dataTransfer.setData('application/x-parallax-screen', card.dataset.screenNumber);
+        event.dataTransfer.effectAllowed = 'move';
+    });
+
+    dashboardWall.addEventListener('change', (event) => {
+        const rotation = event.target.closest('[data-screen-rotation]');
+        const orientation = event.target.closest('[data-screen-orientation]');
+        const position = event.target.closest('[data-screen-position]');
+        const enabled = event.target.closest('[data-screen-enabled]');
+        if (rotation || orientation || position) {
+            const screen = Number((rotation || orientation || position).dataset.screenRotation
+                ?? (rotation || orientation || position).dataset.screenOrientation
+                ?? (rotation || orientation || position).dataset.screenPosition);
+            const oldPosition = displayLayout.screens[screen];
+            const nextPosition = {
+                ...oldPosition,
+                row: position?.dataset.positionAxis === 'row'
+                    ? Number(position.value) : oldPosition.row,
+                column: position?.dataset.positionAxis === 'column'
+                    ? Number(position.value) : oldPosition.column,
+                rotation: rotation ? Number(rotation.value) : oldPosition.rotation,
+                orientation: orientation ? orientation.value : oldPosition.orientation
+            };
+            socket.timeout(5000).emit('screen:configure', {
+                screen,
+                position: nextPosition
+            }, (error, response) => {
+                if (error || !response?.ok) {
+                    layoutStatus.textContent = error
+                        ? 'The server did not acknowledge the screen geometry.'
+                        : response?.message || 'Unable to update screen geometry.';
+                    layoutStatus.classList.add('is-error');
+                    renderDashboardScreens();
+                    return;
+                }
+                totalScreens = response.totalScreens;
+                setDisplayLayout(response.layout);
+                layoutStatus.textContent = `Screen ${screen} geometry updated.`;
+                layoutStatus.classList.remove('is-error');
+            });
+            return;
+        }
+        if (enabled) {
+            const screen = Number(enabled.dataset.screenEnabled);
+            const state = enabled.checked ? 'screen:enable' : 'screen:disable';
+            socket.timeout(5000).emit(state, { screen }, (error, response) => {
+                if (error || !response?.ok) {
+                    layoutStatus.textContent = error
+                        ? 'The server did not acknowledge the screen state.'
+                        : response?.message || 'Unable to update screen enabled state.';
+                    layoutStatus.classList.add('is-error');
+                    renderDashboardScreens();
+                    return;
+                }
+                displayLayout.screens[screen].enabled = response.enabled;
+                renderDashboardScreens();
+                renderPanoramaPreview();
+                layoutStatus.textContent =
+                    `Screen ${screen} ${response.enabled ? 'enabled' : 'disabled'}. Device assignment and calibration were preserved.`;
+                layoutStatus.classList.remove('is-error');
+            });
+        }
     });
 
     presetSelect.addEventListener('change', updatePresetControls);
@@ -1108,8 +1698,11 @@ export function mountController() {
     function setCurrentContent(imageUrl, filename, width, height) {
         const currentImage = root.querySelector('[data-current-image]');
         panoramaImageUrl = imageUrl;
+        panoramaMediaType = 'image';
         currentImage.replaceChildren();
         const image = document.createElement('img');
+        image.dataset.currentMedia = 'true';
+        image.dataset.sourceUrl = new URL(imageUrl, window.location.href).href;
         image.src = imageUrl;
         image.alt = `Currently published panorama: ${filename}`;
         currentImage.append(image);
@@ -1120,10 +1713,389 @@ export function mountController() {
         renderPanoramaPreview();
     }
 
+    function setMediaStatus(message, isError = false) {
+        mediaStatus.textContent = message;
+        mediaStatus.classList.toggle('is-error', isError);
+    }
+
+    function showMediaPreview(item) {
+        if (!item) {
+            return;
+        }
+        preview.replaceChildren();
+        const element = item.mediaType === 'video'
+            ? document.createElement('video')
+            : document.createElement('img');
+        element.src = item.url;
+        if (item.mediaType === 'video') {
+            element.controls = true;
+            element.muted = true;
+            element.playsInline = true;
+            element.preload = 'metadata';
+        } else {
+            element.alt = `Preview ${item.filename}`;
+        }
+        preview.append(element);
+        root.querySelector('[data-file-name]').textContent = item.filename;
+        root.querySelector('[data-file-dimensions]').textContent =
+            item.durationSeconds ? `${formatDuration(item.durationSeconds)} · ${formatBytes(item.size)}`
+                : `${formatBytes(item.size)} · ${item.mediaType}`;
+        fileDetails.hidden = false;
+        selectedFile = null;
+        publishButton.disabled = !selectedFile;
+        setPublishStatus(`Previewing ${item.filename}.`);
+    }
+
+    function renderMediaLibrary() {
+        const query = mediaSearch.value.trim().toLowerCase();
+        const filter = mediaFilter.value;
+        const items = [...mediaLibrary]
+            .filter((item) => filter === 'all' || item.mediaType === filter)
+            .filter((item) => item.filename.toLowerCase().includes(query))
+            .sort((left, right) => Date.parse(right.uploadedAt) - Date.parse(left.uploadedAt));
+        contentLibrary.replaceChildren();
+        if (items.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'dashboard-empty-state';
+            empty.textContent = mediaLibrary.length
+                ? 'No media matches this search and filter.'
+                : 'Uploaded media will appear here.';
+            contentLibrary.append(empty);
+        }
+        for (const item of items) {
+            const row = document.createElement('article');
+            row.className = 'media-library-item';
+            row.dataset.mediaId = item.id;
+            const thumbnailTag = item.mediaType === 'image' ? 'img' : 'video';
+            let thumbnail = mediaThumbnails.get(item.id);
+            if (!thumbnail || thumbnail.tagName.toLowerCase() !== thumbnailTag) {
+                thumbnail = document.createElement(thumbnailTag);
+                thumbnail.className = 'media-library-thumbnail';
+                mediaThumbnails.set(item.id, thumbnail);
+            }
+            if (item.mediaType === 'image') {
+                if (thumbnail.dataset.sourceUrl !== item.url) {
+                    thumbnail.src = item.url;
+                    thumbnail.dataset.sourceUrl = item.url;
+                }
+                thumbnail.alt = '';
+            } else {
+                thumbnail.classList.add('is-video');
+                if (thumbnail.dataset.sourceUrl !== item.url) {
+                    thumbnail.src = item.url;
+                    thumbnail.dataset.sourceUrl = item.url;
+                }
+                thumbnail.muted = true;
+                thumbnail.playsInline = true;
+                thumbnail.preload = 'metadata';
+            }
+            const details = document.createElement('div');
+            details.className = 'media-library-details';
+            const filename = document.createElement('strong');
+            filename.textContent = item.filename;
+            const metadata = document.createElement('span');
+            metadata.textContent = `${item.mediaType.toUpperCase()} · ${formatBytes(item.size)} · ${
+                item.durationSeconds ? formatDuration(item.durationSeconds) : 'Duration unavailable'
+            } · ${formatTimestamp(item.uploadedAt)}`;
+            const status = document.createElement('span');
+            status.className = 'media-item-status';
+            status.textContent = item.id === currentMediaId ? 'Currently published' : 'Saved';
+            details.append(filename, metadata, status);
+            const actions = document.createElement('div');
+            actions.className = 'media-library-actions';
+            actions.append(
+                createMediaAction('Preview', 'preview'),
+                createMediaAction('Publish', 'publish'),
+                createMediaAction('Add to playlist', 'add'),
+                createMediaAction('Delete', 'delete')
+            );
+            row.append(thumbnail, details, actions);
+            contentLibrary.append(row);
+        }
+        renderUploadHistory(mediaUploadHistory);
+        renderScheduleTargets();
+    }
+
+    function createMediaAction(label, action) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'alignment-action';
+        button.dataset.mediaAction = action;
+        button.textContent = label;
+        if (action === 'delete') {
+            button.classList.add('is-danger');
+        }
+        return button;
+    }
+
+    function renderUploadHistory(items = mediaLibrary) {
+        uploadHistory.replaceChildren();
+        const sorted = [...items].sort((left, right) =>
+            Date.parse(right.uploadedAt) - Date.parse(left.uploadedAt));
+        if (sorted.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'dashboard-empty-state';
+            empty.textContent = 'No uploads yet.';
+            uploadHistory.append(empty);
+            return;
+        }
+        for (const item of sorted) {
+            const entry = document.createElement('p');
+            entry.className = 'upload-history-entry';
+            entry.textContent = `${item.filename} · ${item.mediaType} · ${formatBytes(item.size)} · ${
+                formatTimestamp(item.uploadedAt)
+            } · Upload: ${item.uploadStatus} · Publishing: ${item.publishingStatus}`;
+            uploadHistory.append(entry);
+        }
+    }
+
+    function renderPlaylists() {
+        const selectedId = playlistSelect.value;
+        playlistSelect.replaceChildren();
+        for (const playlist of mediaPlaylists) {
+            const option = document.createElement('option');
+            option.value = playlist.id;
+            option.textContent = `${playlist.name} · ${playlist.mediaType} · ${playlist.items.length} items`;
+            playlistSelect.append(option);
+        }
+        playlistSelect.value = mediaPlaylists.some((entry) => entry.id === selectedId)
+            ? selectedId
+            : mediaPlaylists[0]?.id ?? '';
+        const current = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        playlistLoadButton.disabled = !socket.connected || !current?.items.length;
+        playlistDeleteButton.disabled = !socket.connected || !current;
+        playlistPreviewButton.disabled = !current?.items.length;
+        playlistSaveButton.disabled = !socket.connected;
+        if (!current && playlistDraft.length === 0) {
+            playlistDraftElement.innerHTML =
+                '<p class="dashboard-empty-state">Add media from the library to build a playlist.</p>';
+            return;
+        }
+        playlistDraftElement.replaceChildren();
+        const draft = current && playlistDraft.length === 0
+            ? current.items
+            : playlistDraft;
+        for (const [index, entry] of draft.entries()) {
+            const item = mediaLibrary.find((media) => media.id === entry.mediaId);
+            const row = document.createElement('div');
+            row.className = 'playlist-draft-item';
+            const title = document.createElement('span');
+            title.textContent = `${index + 1}. ${item?.filename ?? 'Missing media'} · ${
+                entry.durationSeconds ?? item?.durationSeconds ?? 'default'
+            }${item?.mediaType === 'image' ? ' sec' : ''}`;
+            const controls = document.createElement('div');
+            for (const [action, label] of [['up', '↑'], ['down', '↓'], ['remove', 'Remove']]) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'alignment-action';
+                button.dataset.draftAction = action;
+                button.dataset.draftIndex = String(index);
+                button.textContent = label;
+                controls.append(button);
+            }
+            row.append(title, controls);
+            playlistDraftElement.append(row);
+        }
+        if (playlistNameInput.value === '' && current) {
+            playlistNameInput.value = current.name;
+            playlistTypeSelect.value = current.mediaType;
+        }
+    }
+
+    function renderScheduleTargets() {
+        const selected = scheduleTarget.value;
+        scheduleTarget.replaceChildren();
+        for (const item of mediaLibrary) {
+            const option = document.createElement('option');
+            option.value = `media:${item.id}`;
+            option.textContent = `${item.filename} · ${item.mediaType}`;
+            scheduleTarget.append(option);
+        }
+        for (const playlist of mediaPlaylists) {
+            const option = document.createElement('option');
+            option.value = `playlist:${playlist.id}`;
+            option.textContent = `${playlist.name} · playlist`;
+            scheduleTarget.append(option);
+        }
+        scheduleTarget.value = Array.from(scheduleTarget.options)
+            .some((option) => option.value === selected)
+            ? selected
+            : scheduleTarget.options[0]?.value ?? '';
+        scheduleList.replaceChildren();
+        if (mediaSchedules.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'dashboard-empty-state';
+            empty.textContent = 'No scheduled playback.';
+            scheduleList.append(empty);
+            return;
+        }
+        for (const schedule of mediaSchedules) {
+            const row = document.createElement('div');
+            row.className = 'schedule-list-item';
+            const label = document.createElement('span');
+            label.textContent = `${schedule.targetType} · ${
+                new Date(schedule.startAt).toLocaleString()
+            } to ${new Date(schedule.endAt).toLocaleString()} (${schedule.timeZone})`;
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'alignment-action is-danger';
+            remove.dataset.scheduleDelete = schedule.id;
+            remove.textContent = 'Delete';
+            row.append(label, remove);
+            scheduleList.append(row);
+        }
+    }
+
+    function setPlaybackSnapshot(timeline) {
+        if (!timeline || !['playing', 'paused', 'stopped'].includes(timeline.status)) {
+            return;
+        }
+        currentPlayback = timeline;
+        previewServerTimeOffset = Number.isFinite(timeline.serverNow)
+            ? timeline.serverNow - Date.now()
+            : 0;
+        playbackStatus.textContent = timeline.status;
+        const item = mediaLibrary.find((entry) => entry.id === timeline.mediaId);
+        const playlist = mediaPlaylists.find((entry) => entry.id === timeline.playlistId);
+        const playlistItem = playlist?.items[timeline.playlistIndex];
+        const duration = playlistItem?.durationSeconds ?? item?.durationSeconds ?? 0;
+        playbackSeek.max = String(duration);
+        playbackSeek.disabled = !duration || !socket.connected;
+        const position = expectedPlaybackPosition(timeline, Date.now());
+        playbackSeek.value = String(Math.min(duration || position, position));
+        playbackPosition.textContent = `${formatDuration(position)}${duration
+            ? ` / ${formatDuration(duration)}` : ''}`;
+        synchronizePublishedPreviewVideos();
+        if (timeline.status === 'playing') {
+            if (previewSyncTimer === null) {
+                previewSyncTimer = setInterval(synchronizePublishedPreviewVideos, 200);
+            }
+        } else if (previewSyncTimer !== null) {
+            clearInterval(previewSyncTimer);
+            previewSyncTimer = null;
+        }
+    }
+
+    function handleMediaSnapshot(snapshot) {
+        if (!snapshot || !Array.isArray(snapshot.media)
+            || !Array.isArray(snapshot.playlists) || !Array.isArray(snapshot.schedules)) {
+            return;
+        }
+        mediaLibrary = snapshot.media;
+        const currentMediaIds = new Set(mediaLibrary.map((item) => item.id));
+        for (const [mediaId, thumbnail] of mediaThumbnails) {
+            if (currentMediaIds.has(mediaId)) {
+                continue;
+            }
+            if (thumbnail.tagName.toLowerCase() === 'video') {
+                thumbnail.pause();
+                thumbnail.removeAttribute('src');
+                thumbnail.load();
+            }
+            mediaThumbnails.delete(mediaId);
+        }
+        mediaUploadHistory = Array.isArray(snapshot.uploadHistory)
+            ? snapshot.uploadHistory
+            : snapshot.media.map((item) => ({
+                ...item,
+                uploadStatus: 'uploaded',
+                publishingStatus: item.id === snapshot.playback?.mediaId ? 'published' : 'saved'
+            }));
+        mediaPlaylists = snapshot.playlists;
+        mediaSchedules = snapshot.schedules;
+        currentMediaId = snapshot.playback?.mediaId ?? null;
+        renderMediaLibrary();
+        renderPlaylists();
+        setPlaybackSnapshot(snapshot.playback);
+        const content = snapshot.currentContent;
+        const item = mediaLibrary.find((entry) => entry.id === currentMediaId);
+        if (item && content) {
+            setCurrentMedia(content, item);
+        }
+    }
+
+    function setCurrentMedia(content, item) {
+        const mediaUrl = item.mediaType === 'video' ? content.videoUrl : content.imageUrl;
+        const currentImage = root.querySelector('[data-current-image]');
+        if (typeof mediaUrl !== 'string') {
+            return;
+        }
+        currentMediaId = item.id;
+        panoramaImageUrl = mediaUrl;
+        panoramaMediaType = item.mediaType;
+        let element = currentImage.querySelector('[data-current-media]');
+        const tagName = item.mediaType === 'video' ? 'video' : 'img';
+        const absoluteUrl = new URL(mediaUrl, window.location.href).href;
+        if (!element || element.tagName.toLowerCase() !== tagName
+            || element.dataset.sourceUrl !== absoluteUrl) {
+            element = document.createElement(tagName);
+            element.dataset.currentMedia = 'true';
+            element.dataset.sourceUrl = absoluteUrl;
+            currentImage.replaceChildren(element);
+        }
+        if (item.mediaType === 'video') {
+            element.controls = false;
+            element.muted = true;
+            element.preload = 'auto';
+            element.playsInline = true;
+            element.addEventListener('loadedmetadata', synchronizePublishedPreviewVideos);
+            element.addEventListener('loadeddata', synchronizePublishedPreviewVideos);
+        } else {
+            element.alt = `Currently published panorama: ${item.filename}`;
+        }
+        if (element.dataset.sourceUrl !== absoluteUrl) {
+            element.dataset.sourceUrl = absoluteUrl;
+            element.src = mediaUrl;
+        } else if (!element.src) {
+            element.src = mediaUrl;
+        }
+        if (!element.parentNode) {
+            currentImage.append(element);
+        }
+        root.querySelector('[data-current-name]').textContent = item.filename;
+        root.querySelector('[data-current-meta]').textContent =
+            `${item.mediaType} · ${formatBytes(item.size)} · Published to displays`;
+        renderPanoramaPreview();
+        synchronizePublishedPreviewVideos();
+    }
+
+    function synchronizePublishedPreviewVideos() {
+        if (panoramaMediaType !== 'video'
+            || !currentPlayback
+            || currentPlayback.mediaId !== currentMediaId) {
+            return;
+        }
+        const serverNow = Date.now() + previewServerTimeOffset;
+        const videos = [
+            root.querySelector('[data-current-image] video[data-current-media]'),
+            dashboardPreview.querySelector('video.panorama-preview-image')
+        ];
+        for (const video of videos) {
+            if (!video) {
+                continue;
+            }
+            const result = synchronizePreviewVideo(video, currentPlayback, serverNow);
+            if (result && typeof result.then === 'function') {
+                result.catch((error) => {
+                    if (lastPreviewPlaybackError === currentPlayback.timelineId) {
+                        return;
+                    }
+                    lastPreviewPlaybackError = currentPlayback.timelineId;
+                    console.error('Unable to synchronize controller video preview:', error);
+                    setMediaStatus('Video preview playback could not be synchronized.', true);
+                });
+            }
+        }
+        if (currentPlayback.status !== 'playing') {
+            lastPreviewPlaybackError = null;
+        }
+    }
+
     function setDevices(devices) {
         markServerCommunication();
         registeredDevices = Array.isArray(devices) ? devices : [];
-        const connectedDevices = registeredDevices.filter((device) => device.connected);
+        const connectedDevices = registeredDevices.filter((device) =>
+            device.connected && device.enabled !== false);
         const connectedIds = new Set(connectedDevices.map((device) => device.id));
         if (knownDeviceIds !== null) {
             const newlyConnected = connectedDevices.find((device) => !knownDeviceIds.has(device.id));
@@ -1154,11 +2126,12 @@ export function mountController() {
                 continue;
             }
             const device = devicesByScreen.get(screen);
-            const connected = Boolean(device?.connected);
-            const state = connected ? 'Connected' : device ? 'Disconnected' : 'Waiting';
+            const enabled = displayLayout.screens[screen]?.enabled !== false;
+            const connected = Boolean(device?.connected && enabled);
+            const state = !enabled ? 'Disabled' : connected ? 'Connected' : device ? 'Disconnected' : 'Waiting';
             row.classList.toggle('is-connected', connected);
             row.querySelector('.screen-state span').textContent = state;
-            row.classList.toggle('is-disconnected', Boolean(device) && !connected);
+            row.classList.toggle('is-disconnected', enabled && Boolean(device) && !connected);
         }
 
         deviceAssignmentList.innerHTML = registeredDevices.length
@@ -1202,6 +2175,36 @@ export function mountController() {
         }
         const date = new Date(value);
         return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleTimeString();
+    }
+
+    function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            return '0:00';
+        }
+        const total = Math.floor(seconds);
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const remainder = total % 60;
+        return hours > 0
+            ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+            : `${minutes}:${String(remainder).padStart(2, '0')}`;
+    }
+
+    function formatBytes(bytes) {
+        if (!Number.isFinite(bytes) || bytes < 0) {
+            return 'Unknown size';
+        }
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+        const units = ['KB', 'MB', 'GB'];
+        let value = bytes / 1024;
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            index += 1;
+        }
+        return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
     }
 
     function setDiagnostics(snapshot) {
@@ -1303,6 +2306,11 @@ export function mountController() {
             renderDashboard();
             return;
         }
+        if (Number.isInteger(screen) && displayLayout.screens[screen]?.enabled !== true) {
+            setDashboardStatus(`Screen ${screen} is disabled. Enable it before assigning a device.`, true);
+            renderDashboard();
+            return;
+        }
         const occupant = Number.isInteger(screen)
             ? registeredDevices.find((entry) => entry.screen === screen && entry.id !== deviceId)
             : null;
@@ -1370,27 +2378,53 @@ export function mountController() {
         }
         previewUrl = URL.createObjectURL(file);
         publishButton.disabled = true;
-        const image = new Image();
-        image.onload = () => {
+        const isVideo = /\.mp4$/i.test(file.name);
+        const media = isVideo ? document.createElement('video') : new Image();
+        const onReady = () => {
             if (selectedFile !== file) {
                 return;
             }
-            preview.replaceChildren(image);
+            preview.replaceChildren(media);
             root.querySelector('[data-file-name]').textContent = file.name;
-            root.querySelector('[data-file-dimensions]').textContent =
-                `${image.naturalWidth} × ${image.naturalHeight}`;
+            if (isVideo) {
+                selectedMediaDuration = Number.isFinite(media.duration)
+                    && media.duration > 0 && media.duration <= 86_400
+                    ? media.duration
+                    : null;
+                root.querySelector('[data-file-dimensions]').textContent =
+                    `${media.videoWidth} × ${media.videoHeight} · ${
+                        selectedMediaDuration ? formatDuration(selectedMediaDuration) : 'Duration unavailable'
+                    }`;
+                media.controls = true;
+                media.muted = true;
+                media.playsInline = true;
+            } else {
+                root.querySelector('[data-file-dimensions]').textContent =
+                    `${media.naturalWidth} × ${media.naturalHeight}`;
+            }
             fileDetails.hidden = false;
             publishButton.disabled = false;
-            dropLabel.textContent = 'Image selected - drop another to replace';
+            dropLabel.textContent = `${isVideo ? 'Video' : 'Image'} selected - drop another to replace`;
         };
-        image.onerror = () => {
+        media.onload = isVideo ? null : onReady;
+        media.onloadedmetadata = isVideo ? onReady : null;
+        media.onerror = () => {
             if (selectedFile === file) {
                 selectedFile = null;
                 publishButton.disabled = true;
-                setPublishStatus('This file could not be decoded as an image.', 'is-error');
+                publishButton.disabled = true;
+                setPublishStatus(
+                    `This file could not be decoded as a ${isVideo ? 'video' : 'image'}.`,
+                    'is-error'
+                );
             }
         };
-        image.src = previewUrl;
+        if (isVideo) {
+            media.preload = 'metadata';
+            media.src = previewUrl;
+        } else {
+            media.src = previewUrl;
+        }
     }
 
     function selectFile(file) {
@@ -1398,15 +2432,23 @@ export function mountController() {
             return;
         }
         if (!ACCEPTED_EXTENSIONS.test(file.name)) {
-            setPublishStatus('Choose a JPG, JPEG, PNG, or WebP image.', 'is-error');
+            setPublishStatus('Choose a JPG, JPEG, PNG, WebP image, or MP4 video.', 'is-error');
             return;
         }
-        if (file.size > MAX_FILE_SIZE) {
-            setPublishStatus('The selected image exceeds the 15 MB limit.', 'is-error');
+        const isVideo = /\.mp4$/i.test(file.name);
+        const maxFileSize = isVideo ? MAX_VIDEO_FILE_SIZE : MAX_FILE_SIZE;
+        if (file.size > maxFileSize) {
+            setPublishStatus(
+                `The selected ${isVideo ? 'video' : 'image'} exceeds the ${
+                    isVideo ? '100 MB' : '15 MB'
+                } limit.`,
+                'is-error'
+            );
             return;
         }
 
         selectedFile = file;
+        selectedMediaDuration = null;
         progress.hidden = true;
         setPublishStatus('');
         showPreview(file);
@@ -1419,13 +2461,20 @@ export function mountController() {
 
         const fileToUpload = selectedFile;
         publishButton.disabled = true;
-        setPublishStatus('Uploading and publishing image...');
+        const isVideo = /\.mp4$/i.test(fileToUpload.name);
+        setPublishStatus(`Uploading ${isVideo ? 'video' : 'image'}...`);
         setUploadProgress(0);
 
         const formData = new FormData();
-        formData.append('image', fileToUpload, fileToUpload.name);
+        formData.append('media', fileToUpload, fileToUpload.name);
+        if (isVideo && selectedMediaDuration) {
+            formData.append('durationSeconds', String(selectedMediaDuration));
+        }
         uploadRequest = new XMLHttpRequest();
-        uploadRequest.open('POST', `${getParallaxServerBaseUrl()}/api/upload`);
+        uploadRequest.open('POST', `${getParallaxServerBaseUrl()}/api/media/upload`);
+        if (controllerUploadToken) {
+            uploadRequest.setRequestHeader('X-Parallax-Controller', controllerUploadToken);
+        }
         uploadRequest.upload.addEventListener('progress', (event) => {
             if (event.lengthComputable) {
                 setUploadProgress(Math.round((event.loaded / event.total) * 100));
@@ -1434,7 +2483,7 @@ export function mountController() {
         uploadRequest.addEventListener('load', (event) => {
             const request = event.currentTarget;
             uploadRequest = null;
-            publishButton.disabled = !selectedFile;
+            publishButton.disabled = true;
             let result;
             try {
                 result = JSON.parse(request.responseText);
@@ -1448,15 +2497,28 @@ export function mountController() {
                 return;
             }
 
-            setUploadProgress(100, 'Published');
-            const filename = result.filename || fileToUpload.name;
-            setCurrentContent(result.imageUrl, filename, result.width, result.height);
-            setPublishStatus(
-                result.connectedDevices
-                    ? `Published to ${result.connectedDevices} connected display${result.connectedDevices === 1 ? '' : 's'}.`
-                    : 'Image saved. No displays are connected; it will load when a phone connects.',
-                'is-success'
-            );
+            setUploadProgress(100, isVideo ? 'Uploaded' : 'Publishing');
+            selectedFile = null;
+            selectedMediaDuration = null;
+            if (isVideo) {
+                setPublishStatus(
+                    `${result.filename} uploaded. Preview or publish it from the content library.`,
+                    'is-success'
+                );
+                return;
+            }
+            socket.timeout(5000).emit('media:publish', {
+                mediaId: result.id,
+                transition: mediaTransition.value
+            }, (publishError, published) => {
+                if (publishError || !published?.ok) {
+                    setPublishStatus(publishError
+                        ? 'Image uploaded, but the server did not acknowledge publishing.'
+                        : published?.message || 'Image uploaded, but publishing failed.', 'is-error');
+                    return;
+                }
+                setPublishStatus(`Published ${result.filename} to the display wall.`, 'is-success');
+            });
         });
         uploadRequest.addEventListener('error', () => {
             uploadRequest = null;
@@ -1483,6 +2545,238 @@ export function mountController() {
     }
     dropZone.addEventListener('drop', (event) => selectFile(event.dataTransfer?.files?.[0]));
 
+    function sendMediaCommand(eventName, payload, onSuccess) {
+        socket.timeout(5000).emit(eventName, payload, (error, response) => {
+            if (error || !response?.ok) {
+                setMediaStatus(error
+                    ? `The server did not acknowledge ${eventName}.`
+                    : response?.message || `${eventName} failed.`, true);
+                return;
+            }
+            setMediaStatus(`${eventName.replace(':', ' ')} complete.`);
+            onSuccess?.(response);
+        });
+    }
+
+    function addToPlaylistDraft(item) {
+        const selected = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        if (playlistDraft.length === 0 && selected) {
+            playlistDraft = selected.items.map((entry) => ({ ...entry }));
+        }
+        const expectedType = playlistDraft.length
+            ? mediaLibrary.find((entry) => entry.id === playlistDraft[0].mediaId)?.mediaType
+            : selected?.mediaType ?? playlistTypeSelect.value;
+        if (expectedType && expectedType !== item.mediaType) {
+            setMediaStatus('A playlist can contain only one media type.', true);
+            return;
+        }
+        playlistTypeSelect.value = item.mediaType;
+        const duration = item.mediaType === 'image'
+            ? Number(playlistDurationInput.value)
+            : null;
+        playlistDraft.push({
+            mediaId: item.id,
+            durationSeconds: Number.isFinite(duration) && duration >= 1 ? duration : null
+        });
+        renderPlaylists();
+        setMediaStatus(`${item.filename} added to the playlist draft.`);
+    }
+
+    contentLibrary.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-media-action]');
+        const row = button?.closest('[data-media-id]');
+        const item = mediaLibrary.find((entry) => entry.id === row?.dataset.mediaId);
+        if (!button || !item) {
+            return;
+        }
+        const action = button.dataset.mediaAction;
+        if (action === 'preview') {
+            showMediaPreview(item);
+            return;
+        }
+        if (action === 'add') {
+            addToPlaylistDraft(item);
+            return;
+        }
+        if (action === 'publish') {
+            sendMediaCommand('media:publish', {
+                mediaId: item.id,
+                transition: mediaTransition.value
+            }, () => {
+                setMediaStatus(`${item.filename} published to the display wall.`);
+            });
+            return;
+        }
+        if (action === 'delete') {
+            const isCurrent = item.id === currentMediaId;
+            if (!window.confirm(isCurrent
+                ? `Delete "${item.filename}"? It is currently published and will be removed from all displays.`
+                : `Delete "${item.filename}" from the content library?`)) {
+                return;
+            }
+            sendMediaCommand('media:delete', {
+                mediaId: item.id,
+                ...(isCurrent ? { confirmPublished: true } : {})
+            }, (response) => handleMediaSnapshot(response.media));
+        }
+    });
+
+    mediaSearch.addEventListener('input', renderMediaLibrary);
+    mediaFilter.addEventListener('change', renderMediaLibrary);
+
+    playlistNewButton.addEventListener('click', () => {
+        playlistSelect.value = '';
+        playlistNameInput.value = '';
+        playlistDraft = [];
+        playlistLoopInput.checked = true;
+        playlistShuffleInput.checked = false;
+        renderPlaylists();
+    });
+
+    playlistSelect.addEventListener('change', () => {
+        const playlist = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        playlistDraft = playlist?.items.map((entry) => ({ ...entry })) ?? [];
+        playlistNameInput.value = playlist?.name ?? '';
+        playlistTypeSelect.value = playlist?.mediaType ?? 'image';
+        playlistLoopInput.checked = playlist?.loop ?? true;
+        playlistShuffleInput.checked = playlist?.shuffle ?? false;
+        renderPlaylists();
+    });
+
+    playlistDraftElement.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-draft-action]');
+        if (!button) {
+            return;
+        }
+        const index = Number(button.dataset.draftIndex);
+        const action = button.dataset.draftAction;
+        if (!Number.isInteger(index) || index < 0 || index >= playlistDraft.length) {
+            return;
+        }
+        if (action === 'remove') {
+            playlistDraft.splice(index, 1);
+        } else {
+            const target = action === 'up' ? index - 1 : index + 1;
+            if (target >= 0 && target < playlistDraft.length) {
+                [playlistDraft[index], playlistDraft[target]] =
+                    [playlistDraft[target], playlistDraft[index]];
+            }
+        }
+        renderPlaylists();
+    });
+
+    playlistSaveButton.addEventListener('click', () => {
+        const name = playlistNameInput.value.trim();
+        const mediaType = playlistTypeSelect.value;
+        if (!name || playlistDraft.some((entry) =>
+            mediaLibrary.find((item) => item.id === entry.mediaId)?.mediaType !== mediaType)) {
+            setMediaStatus('Enter a playlist name and use media of one type.', true);
+            return;
+        }
+        const selected = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        const settings = {
+            name,
+            mediaType,
+            items: playlistDraft.map((entry) => ({ ...entry })),
+            loop: playlistLoopInput.checked,
+            shuffle: playlistShuffleInput.checked,
+            transition: mediaTransition.value
+        };
+        const eventName = selected && selected.name === name ? 'playlist:update' : 'playlist:create';
+        const payload = eventName === 'playlist:update'
+            ? { ...settings, id: selected.id }
+            : settings;
+        sendMediaCommand(eventName, payload, (response) => {
+            mediaPlaylists = response.playlists;
+            if (response.playlist) {
+                playlistSelect.value = response.playlist.id;
+                playlistDraft = response.playlist.items.map((entry) => ({ ...entry }));
+            }
+            renderPlaylists();
+            renderScheduleTargets();
+        });
+    });
+
+    playlistLoadButton.addEventListener('click', () => {
+        sendMediaCommand('playlist:load', { id: playlistSelect.value }, () => {
+            setMediaStatus('Playlist loaded. Displays will advance together.');
+        });
+    });
+
+    playlistPreviewButton.addEventListener('click', () => {
+        const playlist = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        const item = mediaLibrary.find((entry) => entry.id === playlist?.items[0]?.mediaId);
+        if (item) {
+            showMediaPreview(item);
+        }
+    });
+
+    playlistDeleteButton.addEventListener('click', () => {
+        const playlist = mediaPlaylists.find((entry) => entry.id === playlistSelect.value);
+        if (!playlist || !window.confirm(`Delete playlist "${playlist.name}"?`)) {
+            return;
+        }
+        sendMediaCommand('playlist:delete', { id: playlist.id }, (response) => {
+            mediaPlaylists = response.playlists;
+            playlistDraft = [];
+            renderPlaylists();
+            renderScheduleTargets();
+        });
+    });
+
+    for (const [selector, eventName] of [
+        ['[data-playback-play]', 'playback:play'],
+        ['[data-playback-pause]', 'playback:pause'],
+        ['[data-playback-resume]', 'playback:resume'],
+        ['[data-playback-stop]', 'playback:stop'],
+        ['[data-playback-next]', 'playback:next'],
+        ['[data-playback-previous]', 'playback:previous']
+    ]) {
+        root.querySelector(selector).addEventListener('click', () => {
+            sendMediaCommand(eventName, {}, (response) => setPlaybackSnapshot(response.playback));
+        });
+    }
+    playbackSeek.addEventListener('change', () => {
+        sendMediaCommand('playback:seek', {
+            positionSeconds: Number(playbackSeek.value)
+        }, (response) => setPlaybackSnapshot(response.playback));
+    });
+
+    scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    root.querySelector('[data-schedule-create]').addEventListener('click', () => {
+        const [targetType, targetId] = scheduleTarget.value.split(':');
+        const startDate = new Date(scheduleStart.value);
+        const endDate = new Date(scheduleEnd.value);
+        if (!targetId || Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            setMediaStatus('Choose a target and valid start/end date and time.', true);
+            return;
+        }
+        sendMediaCommand('schedule:create', {
+            targetType,
+            targetId,
+            startAt: startDate.toISOString(),
+            endAt: endDate.toISOString(),
+            timeZone: scheduleTimezone.value,
+            enabled: true
+        }, (response) => {
+            mediaSchedules = response.schedules;
+            renderScheduleTargets();
+        });
+    });
+
+    scheduleList.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-schedule-delete]');
+        if (!button || !window.confirm('Delete this playback schedule?')) {
+            return;
+        }
+        sendMediaCommand('schedule:delete', {
+            id: button.dataset.scheduleDelete
+        }, (response) => {
+            mediaSchedules = response.schedules;
+            renderScheduleTargets();
+        });
+    });
+
     socket.on('connect', () => {
         root.querySelector('[data-controller-connection]').classList.add('is-online');
         root.querySelector('[data-controller-connection-label]').textContent = 'Display system connected';
@@ -1492,10 +2786,15 @@ export function mountController() {
         assignmentModeSelect.disabled = false;
         screenCountSelect.disabled = false;
         addDeviceButton.disabled = false;
+        scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
         setDevices(registeredDevices);
-        socket.emit('controller:register');
+        socket.emit('controller:register', (result) => {
+            controllerUploadToken = result?.ok ? result.uploadToken : null;
+            publishButton.disabled = !selectedFile || !controllerUploadToken;
+        });
     });
     socket.on('disconnect', () => {
+        controllerUploadToken = null;
         alignmentReady = false;
         for (let screen = 1; screen <= 12; screen += 1) {
             clearTimeout(pendingAlignmentTimers[screen]);
@@ -1508,6 +2807,10 @@ export function mountController() {
         assignmentModeSelect.disabled = true;
         screenCountSelect.disabled = true;
         addDeviceButton.disabled = true;
+        publishButton.disabled = true;
+        playlistSaveButton.disabled = true;
+        playlistLoadButton.disabled = true;
+        playlistDeleteButton.disabled = true;
         if (pairingDialog.open) {
             setPairingStatus('Backend disconnected. The pairing session may have expired.', true);
         }
@@ -1545,6 +2848,15 @@ export function mountController() {
     });
     socket.on('screen-config:current', applyScreenConfiguration);
     socket.on('screen-config:update', applyScreenConfiguration);
+    socket.on('layout-presets:current', (state) => {
+        markServerCommunication();
+        setLayoutPresets(state?.presets);
+    });
+    socket.on('media:current', (snapshot) => {
+        markServerCommunication();
+        handleMediaSnapshot(snapshot);
+    });
+    socket.on('playback:current', setPlaybackSnapshot);
     socket.on('presets:current', (state) => {
         markServerCommunication();
         setPresets(state?.presets);
@@ -1606,6 +2918,10 @@ export function mountController() {
 
     window.addEventListener('beforeunload', () => {
         socket.disconnect();
+        if (previewSyncTimer !== null) {
+            clearInterval(previewSyncTimer);
+            previewSyncTimer = null;
+        }
         for (let screen = 1; screen <= 12; screen += 1) {
             clearTimeout(pendingAlignmentTimers[screen]);
         }
