@@ -132,3 +132,20 @@ test('uses request order even when update IDs are repeated', () => {
 
     assert.equal(container.querySelector('#panorama'), images[1]);
 });
+
+test('renders generalized screen crops and supports live screen reassignment', () => {
+    const { container, images, render } = setupRenderer(1);
+    render.setScreenCount(4);
+    render.setScreen(4);
+    render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'four-screen' });
+    images[0].load();
+
+    assert.equal(container.querySelector('#panorama'), images[0]);
+    assert.equal(images[0].style.width, '400%');
+    assert.equal(images[0].style.left, '-300%');
+
+    render.setScreen(3);
+    assert.equal(images[0].style.left, '-200%');
+    assert.throws(() => render.setScreen(5), /between 1 and 4/);
+    assert.throws(() => render.setScreenCount(13), /between 2 and 12/);
+});

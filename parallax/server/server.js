@@ -14,6 +14,8 @@ const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 50_000_000;
 const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_PRESET_NAME_LENGTH = 32;
+const MIN_SCREEN_COUNT = 2;
+const MAX_SCREEN_COUNT = 12;
 const DEFAULT_PRESET_NAME = 'Default';
 const DISPLAY_STATES = new Set(['waiting', 'loading', 'ready', 'error']);
 const IMAGE_FORMATS = new Map([
@@ -64,7 +66,6 @@ export function createParallaxServer({
     });
     const devices = new Map();
     const controllers = new Set();
-    const positions = [1, 2];
     const deviceRoom = 'parallax:devices';
     const upload = multer({
         storage: multer.memoryStorage(),
@@ -83,18 +84,25 @@ export function createParallaxServer({
     let contentUpdatedAt = null;
     let alignmentUpdatedAt = null;
     let calibrationEnabled = false;
-    const alignmentSettings = createDefaultAlignmentSettings();
+    let totalScreens = 2;
+    let assignmentMode = 'automatic';
+    const alignmentSettings = createDefaultAlignmentSettings(MAX_SCREEN_COUNT);
     let calibrationPresets = [];
+    let persistedAssignments = {};
     let alignmentRevision = 0;
     let settingsUpdateQueue = Promise.resolve();
 
     function getSettingsSnapshot() {
         return {
             calibrationEnabled,
-            screens: getAlignmentSnapshot(),
-            presets: calibrationPresets.map(({ name, screens }) => ({
+            totalScreens,
+            assignmentMode,
+            assignments: { ...persistedAssignments },
+            screens: getStoredAlignmentSnapshot(),
+            presets: calibrationPresets.map(({ name, screens, screenCount }) => ({
                 name,
-                screens: { 1: { ...screens[1] }, 2: { ...screens[2] } }
+                screenCount,
+                screens: cloneAlignmentSettings(screens)
             }))
         };
     }
@@ -103,7 +111,17 @@ export function createParallaxServer({
         const temporaryFile = `${calibrationFile}.${randomUUID()}.tmp`;
         try {
             await writeFile(temporaryFile, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-            await rename(temporaryFile, calibrationFile);
+            for (let attempt = 0; ; attempt += 1) {
+                try {
+                    await rename(temporaryFile, calibrationFile);
+                    break;
+                } catch (error) {
+                    if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 4) {
+                        throw error;
+                    }
+                    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10 * (attempt + 1)));
+                }
+            }
         } catch (error) {
             await unlink(temporaryFile).catch((cleanupError) => {
                 if (cleanupError.code !== 'ENOENT') {
@@ -148,6 +166,57 @@ export function createParallaxServer({
             settings = createDefaultSettings();
             shouldRepair = true;
         } else {
+            totalScreens = MIN_SCREEN_COUNT;
+            const configuredScreenCount = settings.totalScreens ?? MIN_SCREEN_COUNT;
+            if (isScreenCount(configuredScreenCount)) {
+                totalScreens = configuredScreenCount;
+            } else if (settings.totalScreens !== undefined) {
+                shouldRepair = true;
+            }
+            assignmentMode = ['automatic', 'manual'].includes(settings.assignmentMode)
+                ? settings.assignmentMode
+                : 'automatic';
+            if (settings.assignmentMode !== undefined
+                && !['automatic', 'manual'].includes(settings.assignmentMode)) {
+                shouldRepair = true;
+            }
+
+            const storedScreens = {};
+            for (let screen = 1; screen <= MAX_SCREEN_COUNT; screen += 1) {
+                const value = settings.screens[screen];
+                if (value !== undefined && validateStoredAlignment(value)) {
+                    storedScreens[screen] = { ...value };
+                } else {
+                    storedScreens[screen] = createDefaultAlignment();
+                    if (value !== undefined) {
+                        shouldRepair = true;
+                    }
+                }
+            }
+
+            const assignments = settings.assignments && typeof settings.assignments === 'object'
+                && !Array.isArray(settings.assignments)
+                ? settings.assignments
+                : {};
+            persistedAssignments = {};
+            const assignedScreens = new Set();
+            for (const [deviceId, screen] of Object.entries(assignments)) {
+                if (typeof deviceId === 'string' && deviceId.length > 0 && deviceId.length <= 128
+                    && (screen === null || (isScreenNumber(screen) && screen <= totalScreens))
+                    && (screen === null || !assignedScreens.has(screen))) {
+                    persistedAssignments[deviceId] = screen;
+                    if (screen !== null) {
+                        assignedScreens.add(screen);
+                    }
+                } else {
+                    shouldRepair = true;
+                }
+            }
+            if (settings.assignments !== undefined
+                && (typeof settings.assignments !== 'object' || Array.isArray(settings.assignments))) {
+                shouldRepair = true;
+            }
+
             const presets = Array.isArray(settings.presets) ? settings.presets : [];
             const validPresets = [];
             const names = new Set();
@@ -159,17 +228,17 @@ export function createParallaxServer({
                     continue;
                 }
                 names.add(preset.name.toLowerCase());
-                validPresets.push(preset);
+                validPresets.push(normalizeStoredPreset(preset));
             }
             if (settings.presets !== undefined && !Array.isArray(settings.presets)) {
                 shouldRepair = true;
             }
             settings = {
                 calibrationEnabled: settings.calibrationEnabled,
-                screens: {
-                    1: { ...settings.screens[1] },
-                    2: { ...settings.screens[2] }
-                },
+                totalScreens,
+                assignmentMode,
+                assignments: { ...persistedAssignments },
+                screens: storedScreens,
                 presets: validPresets
             };
         }
@@ -184,8 +253,16 @@ export function createParallaxServer({
     const ready = loadSettings().then((settings) => {
         calibrationEnabled = settings.calibrationEnabled;
         alignmentSettings[1] = { ...settings.screens[1] };
-        alignmentSettings[2] = { ...settings.screens[2] };
+        for (let screen = 2; screen <= MAX_SCREEN_COUNT; screen += 1) {
+            alignmentSettings[screen] = { ...settings.screens[screen] };
+        }
         calibrationPresets = settings.presets ?? [];
+        totalScreens = settings.totalScreens ?? MIN_SCREEN_COUNT;
+        assignmentMode = settings.assignmentMode ?? 'automatic';
+        persistedAssignments = { ...(settings.assignments ?? {}) };
+        for (const [id, screen] of Object.entries(persistedAssignments)) {
+            devices.set(id, createDeviceRecord(id, screen));
+        }
     });
 
     function updateSettings(update) {
@@ -200,8 +277,18 @@ export function createParallaxServer({
                 } catch (error) {
                     calibrationEnabled = previous.calibrationEnabled;
                     alignmentSettings[1] = previous.screens[1];
-                    alignmentSettings[2] = previous.screens[2];
+                    for (let screen = 2; screen <= MAX_SCREEN_COUNT; screen += 1) {
+                        alignmentSettings[screen] = previous.screens[screen];
+                    }
                     calibrationPresets = previous.presets;
+                    totalScreens = previous.totalScreens;
+                    assignmentMode = previous.assignmentMode;
+                    persistedAssignments = previous.assignments;
+                    for (const [id, device] of devices) {
+                        if (id in persistedAssignments) {
+                            device.screen = persistedAssignments[id];
+                        }
+                    }
                     throw error;
                 }
             }
@@ -213,17 +300,19 @@ export function createParallaxServer({
     }
 
     function getAlignmentSnapshot() {
-        return {
-            1: { ...alignmentSettings[1] },
-            2: { ...alignmentSettings[2] }
-        };
+        return createAlignmentSnapshot(totalScreens, alignmentSettings);
+    }
+
+    function getStoredAlignmentSnapshot() {
+        return cloneAlignmentSettings(alignmentSettings);
     }
 
     function validateAlignment(state) {
         const settings = state?.settings;
         if (!state || typeof state !== 'object' || Array.isArray(state)
             || !Number.isInteger(state.screen)
-            || ![1, 2].includes(state.screen)
+            || !isScreenNumber(state.screen)
+            || state.screen > totalScreens
             || !settings || typeof settings !== 'object' || Array.isArray(settings)) {
             return false;
         }
@@ -270,6 +359,7 @@ export function createParallaxServer({
         return [...devices.values()].map(({ id, screen, socketId }) => ({
             id,
             screen,
+            connected: socketId !== null,
             socketId
         }));
     }
@@ -279,14 +369,61 @@ export function createParallaxServer({
             {
                 name: DEFAULT_PRESET_NAME,
                 isDefault: true,
-                screens: createDefaultAlignmentSettings()
+                screens: createAlignmentSnapshot(totalScreens, {})
             },
-            ...calibrationPresets.map(({ name, screens }) => ({
+            ...calibrationPresets.map(({ name, screens: presetScreens }) => ({
                 name,
                 isDefault: false,
-                screens: { 1: { ...screens[1] }, 2: { ...screens[2] } }
+                screens: createAlignmentSnapshot(totalScreens, presetScreens)
             }))
         ];
+    }
+
+    function getScreenConfigSnapshot() {
+        return {
+            totalScreens,
+            assignmentMode,
+            screens: getAlignmentSnapshot()
+        };
+    }
+
+    function getDeviceConfiguration(device) {
+        return {
+            deviceId: device.id,
+            screen: device.screen,
+            totalScreens,
+            calibrationEnabled,
+            alignment: device.screen ? { ...alignmentSettings[device.screen] } : null,
+            currentContent
+        };
+    }
+
+    function emitDeviceConfiguration(device, eventName = 'device:assignment-update') {
+        if (!device.socketId) {
+            return;
+        }
+        const target = io.sockets.sockets.get(device.socketId);
+        if (!target) {
+            return;
+        }
+        if (device.screen === null) {
+            target.emit('device:unassigned', getDeviceConfiguration(device));
+            return;
+        }
+        target.emit(eventName, getDeviceConfiguration(device));
+        target.emit('content:update', currentContent);
+        target.emit('calibration:update', { enabled: calibrationEnabled });
+        target.emit('alignment:update', {
+            screens: getAlignmentSnapshot(),
+            revision: alignmentRevision
+        });
+    }
+
+    function broadcastScreenConfiguration() {
+        const payload = getScreenConfigSnapshot();
+        io.emit('screen-config:update', payload);
+        broadcastDeviceSnapshot();
+        broadcastDiagnostics();
     }
 
     function getDiagnosticsSnapshot() {
@@ -300,10 +437,11 @@ export function createParallaxServer({
             screens: getAlignmentSnapshot(),
             alignmentRevision,
             alignmentUpdatedAt,
-            devices: [1, 2].map((screen) => {
+            devices: Array.from({ length: totalScreens }, (_, index) => index + 1).map((screen) => {
                 const device = activeDevices.find((entry) => entry.screen === screen);
                 return {
                     screen,
+                    deviceId: device?.id ?? null,
                     status: !device ? 'waiting' : device.socketId ? 'connected' : 'disconnected',
                     displayStatus: device?.displayStatus ?? 'unknown',
                     displayError: device?.displayError ?? null,
@@ -335,7 +473,11 @@ export function createParallaxServer({
         alignmentRevision += 1;
         alignmentUpdatedAt = new Date().toISOString();
         const payload = { screens, revision: alignmentRevision };
-        io.to(deviceRoom).emit('alignment:update', payload);
+        for (const device of devices.values()) {
+            if (device.socketId && device.screen !== null) {
+                io.sockets.sockets.get(device.socketId)?.emit('alignment:update', payload);
+            }
+        }
         for (const controllerId of controllers) {
             if (controllerId !== sourceControllerId) {
                 io.sockets.sockets.get(controllerId)?.emit('alignment:current', payload);
@@ -517,7 +659,7 @@ export function createParallaxServer({
         console.log(`Socket connected: ${socket.id} (${socket.conn.transport.name})`);
         broadcastDeviceSnapshot(socket);
 
-        socket.on('device:register', (deviceId) => {
+        socket.on('device:register', async (deviceId) => {
             if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
                 console.warn(`Device registration rejected for socket ${socket.id}: invalid device ID`);
                 socket.emit('device:rejected', { message: 'Invalid device ID' });
@@ -526,29 +668,51 @@ export function createParallaxServer({
 
             let device = devices.get(deviceId);
             if (!device) {
-                const usedScreens = [...devices.values()].map(({ screen }) => screen);
-                const screen = positions.find((position) => !usedScreens.includes(position));
+                const screen = Object.prototype.hasOwnProperty.call(persistedAssignments, deviceId)
+                    ? persistedAssignments[deviceId]
+                    : null;
+                device = createDeviceRecord(deviceId, screen);
+                devices.set(deviceId, device);
+            }
 
-                if (!screen) {
-                    console.warn(`Device registration rejected: screen capacity reached (${deviceId})`);
+            if (!Object.prototype.hasOwnProperty.call(persistedAssignments, deviceId)
+                || (assignmentMode === 'automatic' && device.screen === null)) {
+                try {
+                    await updateSettings(() => {
+                        let screen = null;
+                        if (assignmentMode === 'automatic') {
+                            const usedScreens = new Set(
+                                Object.entries(persistedAssignments)
+                                    .filter(([id, assignedScreen]) =>
+                                        id !== deviceId && assignedScreen !== null)
+                                    .map(([, assignedScreen]) => assignedScreen)
+                            );
+                            screen = Array.from(
+                                { length: totalScreens },
+                                (_, index) => index + 1
+                            ).find((position) => !usedScreens.has(position));
+                            if (!screen) {
+                                throw new Error('SCREEN_CAPACITY');
+                            }
+                        }
+                        device.screen = screen;
+                        persistedAssignments[deviceId] = screen;
+                    });
+                } catch (error) {
+                    devices.delete(deviceId);
+                    if (error.message === 'SCREEN_CAPACITY') {
+                        console.warn(`Device registration rejected: screen capacity reached (${deviceId})`);
+                        socket.emit('device:rejected', {
+                            message: `All ${totalScreens} screens are assigned. Reassign or unassign a device first.`
+                        });
+                        return;
+                    }
+                    console.error('Unable to persist device assignment:', error);
                     socket.emit('device:rejected', {
-                        message: 'Both screens are assigned. Disconnect another device and try again.'
+                        message: 'Unable to save device assignment. Please try again.'
                     });
                     return;
                 }
-
-                device = {
-                    id: deviceId,
-                    screen,
-                    socketId: null,
-                    disconnectTimer: null,
-                    displayStatus: 'waiting',
-                    displayError: null,
-                    lastActivity: null,
-                    loadedUpdateId: null,
-                    reportedAlignmentRevision: null
-                };
-                devices.set(deviceId, device);
             }
 
             if (device.disconnectTimer) {
@@ -564,19 +728,22 @@ export function createParallaxServer({
                 io.sockets.sockets.get(previousSocketId)?.disconnect(true);
             }
 
-            socket.emit('device:assigned', {
-                deviceId: device.id,
-                screen: device.screen
-            });
-            socket.emit('content:update', currentContent);
-            socket.emit('calibration:update', {
-                enabled: calibrationEnabled
-            });
-            socket.emit('alignment:update', {
-                screens: getAlignmentSnapshot(),
-                revision: alignmentRevision
-            });
-            console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
+            if (device.screen === null) {
+                socket.emit('device:unassigned', getDeviceConfiguration(device));
+                console.log(`Device registered without a screen: ${device.id} | Socket ${socket.id}`);
+            } else {
+                socket.emit('device:assigned', {
+                    ...getDeviceConfiguration(device),
+                    screen: device.screen
+                });
+                socket.emit('content:update', currentContent);
+                socket.emit('calibration:update', { enabled: calibrationEnabled });
+                socket.emit('alignment:update', {
+                    screens: getAlignmentSnapshot(),
+                    revision: alignmentRevision
+                });
+                console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
+            }
             broadcastDeviceSnapshot();
             broadcastDiagnostics();
         });
@@ -615,9 +782,134 @@ export function createParallaxServer({
             socket.emit('alignment:current', {
                 screens: getAlignmentSnapshot()
             });
+            socket.emit('screen-config:current', getScreenConfigSnapshot());
             socket.emit('presets:current', { presets: getPresetsSnapshot() });
             socket.emit('diagnostics:update', getDiagnosticsSnapshot());
             broadcastDeviceSnapshot(socket);
+        });
+
+        socket.on('screen-config:set', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized screen configuration request' });
+                return;
+            }
+            if (!request || !isScreenCount(request.totalScreens)
+                || !['automatic', 'manual'].includes(request.assignmentMode)) {
+                respond({
+                    ok: false,
+                    message: 'Screen count must be between 2 and 12 and assignment mode must be automatic or manual.'
+                });
+                return;
+            }
+
+            const affectedDevices = Object.entries(persistedAssignments)
+                .filter(([, screen]) => screen !== null && screen > request.totalScreens)
+                .map(([deviceId]) => deviceId);
+            if (affectedDevices.length > 0) {
+                respond({
+                    ok: false,
+                    message: `Reassign or unassign these devices before reducing the screen count: ${affectedDevices.join(', ')}.`,
+                    affectedDevices
+                });
+                return;
+            }
+
+            try {
+                await updateSettings(() => {
+                    const newlyAffected = Object.entries(persistedAssignments)
+                        .filter(([, screen]) => screen !== null && screen > request.totalScreens)
+                        .map(([deviceId]) => deviceId);
+                    if (newlyAffected.length > 0) {
+                        throw new Error(`SCREEN_ASSIGNMENT_CONFLICT:${newlyAffected.join(', ')}`);
+                    }
+                    totalScreens = request.totalScreens;
+                    assignmentMode = request.assignmentMode;
+                });
+            } catch (error) {
+                if (error.message.startsWith('SCREEN_ASSIGNMENT_CONFLICT:')) {
+                    const affected = error.message.slice('SCREEN_ASSIGNMENT_CONFLICT:'.length);
+                    respond({
+                        ok: false,
+                        message: `Reassign or unassign these devices before reducing the screen count: ${affected}.`,
+                        affectedDevices: affected.split(', ')
+                    });
+                    return;
+                }
+                console.error('Unable to persist screen configuration:', error);
+                respond({ ok: false, message: 'Unable to save screen configuration' });
+                return;
+            }
+
+            await broadcastScreenConfiguration();
+            respond({ ok: true, ...getScreenConfigSnapshot() });
+        });
+
+        socket.on('device:assign-screen', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized device assignment request' });
+                return;
+            }
+            const deviceId = request?.deviceId;
+            const screen = request?.screen;
+            if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128
+                || !(screen === null || (isScreenNumber(screen) && screen <= totalScreens))) {
+                respond({ ok: false, message: 'Invalid device or screen assignment' });
+                return;
+            }
+            const device = devices.get(deviceId);
+            if (!device) {
+                respond({ ok: false, message: 'Device is not registered' });
+                return;
+            }
+            const conflictingDevice = Object.entries(persistedAssignments)
+                .find(([id, assignedScreen]) => id !== deviceId && screen !== null
+                    && assignedScreen === screen);
+            if (conflictingDevice) {
+                respond({
+                    ok: false,
+                    message: `Screen ${screen} is already assigned to ${conflictingDevice[0]}.`
+                });
+                return;
+            }
+
+            try {
+                await updateSettings(() => {
+                    if (screen !== null && screen > totalScreens) {
+                        throw new Error('SCREEN_COUNT_CHANGED');
+                    }
+                    const currentConflict = Object.entries(persistedAssignments)
+                        .find(([id, assignedScreen]) => id !== deviceId && screen !== null
+                            && assignedScreen === screen);
+                    if (currentConflict) {
+                        throw new Error(`SCREEN_ALREADY_ASSIGNED:${currentConflict[0]}`);
+                    }
+                    persistedAssignments[deviceId] = screen;
+                    device.screen = screen;
+                    device.displayStatus = 'waiting';
+                    device.displayError = null;
+                    device.loadedUpdateId = null;
+                    device.reportedAlignmentRevision = null;
+                });
+            } catch (error) {
+                if (error.message === 'SCREEN_COUNT_CHANGED') {
+                    respond({ ok: false, message: 'Screen count changed. Refresh the assignment and try again.' });
+                    return;
+                }
+                if (error.message.startsWith('SCREEN_ALREADY_ASSIGNED:')) {
+                    const owner = error.message.slice('SCREEN_ALREADY_ASSIGNED:'.length);
+                    respond({ ok: false, message: `Screen ${screen} is already assigned to ${owner}.` });
+                    return;
+                }
+                console.error('Unable to persist device screen assignment:', error);
+                respond({ ok: false, message: 'Unable to save device assignment' });
+                return;
+            }
+
+            emitDeviceConfiguration(device);
+            await broadcastScreenConfiguration();
+            respond({ ok: true, deviceId, screen });
         });
 
         socket.on('device:report', (report) => {
@@ -729,9 +1021,11 @@ export function createParallaxServer({
                 return;
             }
 
-            let settings;
             try {
-                settings = await updateSettings(() => {
+                await updateSettings(() => {
+                    if (state.screen > totalScreens) {
+                        throw new Error('ALIGNMENT_SCREEN_CHANGED');
+                    }
                     alignmentSettings[state.screen] = {
                         horizontal: state.settings.horizontal,
                         vertical: state.settings.vertical,
@@ -739,6 +1033,10 @@ export function createParallaxServer({
                     };
                 });
             } catch (error) {
+                if (error.message === 'ALIGNMENT_SCREEN_CHANGED') {
+                    respond({ ok: false, message: 'Screen configuration changed. Refresh alignment settings and try again.' });
+                    return;
+                }
                 console.error('Unable to persist alignment settings:', error);
                 respond({
                     ok: false,
@@ -746,7 +1044,7 @@ export function createParallaxServer({
                 });
                 return;
             }
-            const screens = settings.screens;
+            const screens = getAlignmentSnapshot();
 
             broadcastAlignment(screens, socket.id);
             respond({
@@ -780,7 +1078,11 @@ export function createParallaxServer({
                     }
                     calibrationPresets = [
                         ...calibrationPresets,
-                        { name, screens: getAlignmentSnapshot() }
+                        {
+                            name,
+                            screenCount: totalScreens,
+                            screens: getAlignmentSnapshot()
+                        }
                     ];
                 });
             } catch (error) {
@@ -811,7 +1113,7 @@ export function createParallaxServer({
 
             const name = request.name.trim();
             const preset = name.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()
-                ? { name: DEFAULT_PRESET_NAME, screens: createDefaultAlignmentSettings() }
+                ? { name: DEFAULT_PRESET_NAME, screens: {} }
                 : calibrationPresets.find((entry) =>
                     entry.name.toLowerCase() === name.toLowerCase());
             if (!preset) {
@@ -819,11 +1121,13 @@ export function createParallaxServer({
                 return;
             }
 
-            let settings;
             try {
-                settings = await updateSettings(() => {
-                    alignmentSettings[1] = { ...preset.screens[1] };
-                    alignmentSettings[2] = { ...preset.screens[2] };
+                await updateSettings(() => {
+                    for (let screen = 1; screen <= totalScreens; screen += 1) {
+                        alignmentSettings[screen] = preset.screens[screen]
+                            ? { ...preset.screens[screen] }
+                            : createDefaultAlignment();
+                    }
                 });
             } catch (error) {
                 console.error('Unable to persist loaded calibration preset:', error);
@@ -831,8 +1135,8 @@ export function createParallaxServer({
                 return;
             }
 
-            broadcastAlignment(settings.screens, socket.id);
-            respond({ ok: true, name: preset.name, screens: settings.screens });
+            broadcastAlignment(getAlignmentSnapshot(), socket.id);
+            respond({ ok: true, name: preset.name, screens: getAlignmentSnapshot() });
         });
 
         socket.on('preset:delete', async (request, acknowledge) => {
@@ -892,8 +1196,8 @@ export function createParallaxServer({
                         return;
                     }
 
-                    devices.delete(deviceId);
-                    console.log(`Device reservation expired: ${deviceId} | Screen ${device.screen}`);
+                    device.disconnectTimer = null;
+                    console.log(`Device remains available for reassignment: ${deviceId} | Screen ${device.screen}`);
                     broadcastDeviceSnapshot();
                     broadcastDiagnostics();
                 }, reservationMs);
@@ -935,17 +1239,60 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     });
 }
 
-function createDefaultAlignmentSettings() {
+function createDefaultAlignment() {
+    return { horizontal: 0, vertical: 0, scale: 1 };
+}
+
+function createDefaultAlignmentSettings(count = MAX_SCREEN_COUNT) {
+    return Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [index + 1, createDefaultAlignment()])
+    );
+}
+
+function createAlignmentSnapshot(count, settings) {
+    return Object.fromEntries(
+        Array.from({ length: count }, (_, index) => {
+            const screen = index + 1;
+            return [screen, { ...(settings[screen] ?? createDefaultAlignment()) }];
+        })
+    );
+}
+
+function cloneAlignmentSettings(settings) {
+    return Object.fromEntries(
+        Object.entries(settings).map(([screen, value]) => [screen, { ...value }])
+    );
+}
+
+function createDeviceRecord(id, screen) {
     return {
-        1: { horizontal: 0, vertical: 0, scale: 1 },
-        2: { horizontal: 0, vertical: 0, scale: 1 }
+        id,
+        screen,
+        socketId: null,
+        disconnectTimer: null,
+        displayStatus: 'waiting',
+        displayError: null,
+        lastActivity: null,
+        loadedUpdateId: null,
+        reportedAlignmentRevision: null
     };
+}
+
+function isScreenCount(value) {
+    return Number.isInteger(value) && value >= MIN_SCREEN_COUNT && value <= MAX_SCREEN_COUNT;
+}
+
+function isScreenNumber(value) {
+    return Number.isInteger(value) && value >= 1 && value <= MAX_SCREEN_COUNT;
 }
 
 function createDefaultSettings() {
     return {
         calibrationEnabled: false,
-        screens: createDefaultAlignmentSettings(),
+        totalScreens: MIN_SCREEN_COUNT,
+        assignmentMode: 'automatic',
+        assignments: {},
+        screens: createDefaultAlignmentSettings(MAX_SCREEN_COUNT),
         presets: []
     };
 }
@@ -969,14 +1316,29 @@ function isValidStoredSettings(settings) {
         return false;
     }
 
-    return [1, 2].every((screen) => validateStoredAlignment(settings.screens[screen]));
+    return true;
 }
 
 function isValidStoredPreset(preset) {
     return preset && typeof preset === 'object' && !Array.isArray(preset)
         && validatePresetName(preset.name) === preset.name
         && preset.screens && typeof preset.screens === 'object' && !Array.isArray(preset.screens)
-        && [1, 2].every((screen) => validateStoredAlignment(preset.screens[screen]));
+        && [1, 2].every((screen) => validateStoredAlignment(preset.screens[screen]))
+        && (preset.screenCount === undefined || isScreenCount(preset.screenCount));
+}
+
+function normalizeStoredPreset(preset) {
+    const screens = {};
+    for (let screen = 1; screen <= MAX_SCREEN_COUNT; screen += 1) {
+        screens[screen] = validateStoredAlignment(preset.screens[screen])
+            ? { ...preset.screens[screen] }
+            : createDefaultAlignment();
+    }
+    return {
+        name: preset.name,
+        screenCount: preset.screenCount ?? MIN_SCREEN_COUNT,
+        screens
+    };
 }
 
 function validateStoredAlignment(settings) {

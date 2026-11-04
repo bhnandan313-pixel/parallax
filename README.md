@@ -1,6 +1,6 @@
 # PARALLAX
 
-PARALLAX publishes an image to two connected display devices and provides a browser-based controller for uploading content and adjusting screen alignment.
+PARALLAX publishes one panoramic image across 2–12 connected display devices and provides a browser-based controller for uploading content, managing screen assignments, and adjusting alignment.
 
 ## Requirements
 
@@ -56,15 +56,15 @@ Open the Vite URL printed in the terminal (normally <http://localhost:5173/>).
 - Display page: <http://localhost:5173/>
 - Controller: <http://localhost:5173/controller>
 
-Open the display page on up to two devices. Once they connect, use the controller to upload and publish an image, enable calibration, or adjust each screen's alignment. Supported uploads are JPG, PNG, and WebP files up to 15 MB.
+Open the display page on each phone. In the controller's **Connected displays** section, choose a screen count from 2 to 12 and either automatic or manual assignment. Automatic mode assigns free screens as devices register. Manual mode leaves new phones unassigned until you select a screen in **Registered devices**. Each configured screen can be aligned independently. Supported uploads are JPG, PNG, and WebP files up to 15 MB.
 
-Calibration enabled state, both screen alignments, and named calibration presets are stored in `server/data/calibration.json` and restored when the backend starts. The backend creates this file with default settings when it is missing; invalid or corrupted settings are logged and repaired without discarding valid alignments. Writes use a serialized queue and atomic temporary-file replacement.
+Calibration state, screen count, assignment mode, device-to-screen assignments, alignments, and named calibration presets are stored in `server/data/calibration.json` and restored when the backend starts. Existing two-screen settings are migrated without changing their values. Alignment values for screens outside the active count are retained when the count is reduced. A reduction is rejected if it would invalidate an existing device assignment; reassign or unassign those devices first. The backend creates the file when missing, repairs invalid or corrupted data, and serializes atomic temporary-file writes.
 
 The controller's calibration section includes the built-in **Default** preset, save/load/delete controls for custom presets (names are limited to 32 characters and must be unique), individual screen resets, a reset-all action, and a fine-adjustment toggle. Fine mode changes slider increments to 0.1 px and 0.001× without snapping current values. Preset deletion asks for confirmation and does not change current alignment.
 
 The **Diagnostics** section displays backend/socket connectivity, each screen's connection and reported display state, last device activity, current content status, and whether each connected phone has acknowledged the latest alignment revision. Status timestamps represent observed server/device activity, not a measured heartbeat.
 
-The backend adds Socket.IO events `presets:current`, `preset:save`, `preset:load`, `preset:delete`, `device:report`, and `diagnostics:update`. Preset modification events are restricted to registered controllers; phones report display state and alignment receipt without polling.
+The backend also uses Socket.IO events `screen-config:set`, `screen-config:current`, `screen-config:update`, `device:assign-screen`, `device:assignment-update`, and `device:unassigned` for screen configuration and assignment. Preset and screen-configuration modifications are restricted to registered controllers; phones report display state and alignment receipt without polling.
 
 ## Use devices on the same network
 

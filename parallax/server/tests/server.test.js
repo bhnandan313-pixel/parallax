@@ -7,6 +7,25 @@ import { io as createSocket } from 'socket.io-client';
 import sharp from 'sharp';
 import { createParallaxServer } from '../server.js';
 
+function defaultScreens(count = 12) {
+    return Object.fromEntries(Array.from({ length: count }, (_, index) => [
+        index + 1,
+        { horizontal: 0, vertical: 0, scale: 1 }
+    ]));
+}
+
+function storedSettings({ calibrationEnabled = false, screens = {}, assignments = {},
+    totalScreens = 2, assignmentMode = 'automatic', presets = [] } = {}) {
+    return {
+        calibrationEnabled,
+        totalScreens,
+        assignmentMode,
+        assignments,
+        screens: { ...defaultScreens(), ...screens },
+        presets
+    };
+}
+
 async function startServer(options) {
     const {
         testDirectory: providedTestDirectory,
@@ -207,7 +226,7 @@ test('authorizes and synchronizes independent screen alignment settings', async 
 
         await waitForDisconnect(first.socket);
         await new Promise((resolve) => setTimeout(resolve, 100));
-        const replacement = await registerDevice(server.url, 'alignment-phone-three');
+        const replacement = await registerDevice(server.url, 'alignment-phone-one');
         clients.push(replacement.socket);
         assert.equal(replacement.assignment.screen, 1);
         assert.deepEqual((await replacement.initialAlignment).screens, bothScreens.screens);
@@ -267,7 +286,7 @@ test('authorizes calibration controllers and synchronizes current state to displ
 
         await waitForDisconnect(first.socket);
         await new Promise((resolve) => setTimeout(resolve, 100));
-        const replacement = await registerDevice(server.url, 'calibration-phone-three');
+        const replacement = await registerDevice(server.url, 'calibration-phone-one');
         clients.push(replacement.socket);
         assert.equal(replacement.assignment.screen, 1);
         assert.deepEqual(await replacement.initialCalibration, { enabled: true });
@@ -303,14 +322,7 @@ test('authorizes calibration controllers and synchronizes current state to displ
 
 test('creates default settings and restores calibration and independent alignment settings after restart', async () => {
     const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-persistence-test-'));
-    const defaultSettings = {
-        calibrationEnabled: false,
-        presets: [],
-        screens: {
-            1: { horizontal: 0, vertical: 0, scale: 1 },
-            2: { horizontal: 0, vertical: 0, scale: 1 }
-        }
-    };
+    const defaultSettings = storedSettings();
     const screenOne = { horizontal: 20, vertical: 0, scale: 1 };
     const screenTwo = { horizontal: 0, vertical: -15, scale: 1 };
     let server = await startServer({ testDirectory });
@@ -337,11 +349,10 @@ test('creates default settings and restores calibration and independent alignmen
         });
         assert.deepEqual(screenTwoResult, { ok: true, screen: 2, settings: screenTwo });
 
-        const savedSettings = {
+        const savedSettings = storedSettings({
             calibrationEnabled: true,
-            presets: [],
             screens: { 1: screenOne, 2: screenTwo }
-        };
+        });
         assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), savedSettings);
 
         for (const socket of clients) {
@@ -359,8 +370,9 @@ test('creates default settings and restores calibration and independent alignmen
         assert.equal(secondPhone.assignment.screen, 2);
         assert.deepEqual(await firstPhone.initialCalibration, { enabled: true });
         assert.deepEqual(await secondPhone.initialCalibration, { enabled: true });
-        assert.deepEqual((await firstPhone.initialAlignment).screens, savedSettings.screens);
-        assert.deepEqual((await secondPhone.initialAlignment).screens, savedSettings.screens);
+        const activeSavedScreens = { 1: screenOne, 2: screenTwo };
+        assert.deepEqual((await firstPhone.initialAlignment).screens, activeSavedScreens);
+        assert.deepEqual((await secondPhone.initialAlignment).screens, activeSavedScreens);
 
         const restartedController = await connectClient(server.url);
         clients.push(restartedController);
@@ -368,18 +380,149 @@ test('creates default settings and restores calibration and independent alignmen
         const currentAlignment = nextEvent(restartedController, 'alignment:current');
         restartedController.emit('controller:register');
         assert.deepEqual(await currentCalibration, { enabled: true });
-        assert.deepEqual((await currentAlignment).screens, savedSettings.screens);
+        assert.deepEqual((await currentAlignment).screens, activeSavedScreens);
 
         const resetSettings = { horizontal: 0, vertical: 0, scale: 1 };
         const resetResult = await new Promise((resolve) => {
             restartedController.emit('alignment:set', { screen: 1, settings: resetSettings }, resolve);
         });
         assert.deepEqual(resetResult, { ok: true, screen: 1, settings: resetSettings });
-        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), {
-            calibrationEnabled: true,
-            presets: [],
-            screens: { 1: resetSettings, 2: screenTwo }
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')),
+            storedSettings({
+                calibrationEnabled: true,
+                assignments: {
+                    'persisted-phone-one': 1,
+                    'persisted-phone-two': 2
+                },
+                screens: { 1: resetSettings, 2: screenTwo }
+            }));
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('configures four screens, persists assignments and presets, and restores them after restart', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-multi-screen-test-'));
+    let server = await startServer({ testDirectory });
+    let clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        const configResult = await emitAck(controller, 'screen-config:set', {
+            totalScreens: 12,
+            assignmentMode: 'automatic'
         });
+        assert.equal(configResult.ok, true);
+        assert.equal(configResult.totalScreens, 12);
+        assert.equal((await emitAck(controller, 'screen-config:set', {
+            totalScreens: 4,
+            assignmentMode: 'automatic'
+        })).ok, true);
+
+        const phones = [];
+        for (let screen = 1; screen <= 4; screen += 1) {
+            const phone = await registerDevice(server.url, `multi-phone-${screen}`);
+            phones.push(phone);
+            clients.push(phone.socket);
+            assert.equal(phone.assignment.screen, screen);
+            assert.equal(phone.assignment.totalScreens, 4);
+            assert.deepEqual(Object.keys((await phone.initialAlignment).screens), ['1', '2', '3', '4']);
+        }
+
+        const screenFourSettings = { horizontal: 25, vertical: -15, scale: 1.02 };
+        assert.deepEqual(await emitAck(controller, 'alignment:set', {
+            screen: 4,
+            settings: screenFourSettings
+        }), { ok: true, screen: 4, settings: screenFourSettings });
+        assert.equal((await emitAck(controller, 'preset:save', { name: 'Four screens' })).ok, true);
+        assert.equal((await emitAck(controller, 'screen-config:set', {
+            totalScreens: 3,
+            assignmentMode: 'automatic'
+        })).ok, false);
+
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        assert.equal((await emitAck(unauthorized, 'screen-config:set', {
+            totalScreens: 2,
+            assignmentMode: 'manual'
+        })).ok, false);
+        assert.equal((await emitAck(unauthorized, 'device:assign-screen', {
+            deviceId: 'multi-phone-4',
+            screen: 3
+        })).ok, false);
+        assert.equal((await emitAck(controller, 'screen-config:set', {
+            totalScreens: 13,
+            assignmentMode: 'automatic'
+        })).ok, false);
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients = [];
+        await server.close();
+
+        server = await startServer({ testDirectory });
+        const restoredController = await connectClient(server.url);
+        clients.push(restoredController);
+        const currentConfig = nextEvent(restoredController, 'screen-config:current');
+        const currentPresets = nextEvent(restoredController, 'presets:current');
+        restoredController.emit('controller:register');
+        assert.equal((await currentConfig).totalScreens, 4);
+        assert.ok((await currentPresets).presets.some((preset) => preset.name === 'Four screens'));
+
+        const restoredPhone = await registerDevice(server.url, 'multi-phone-4');
+        clients.push(restoredPhone.socket);
+        assert.equal(restoredPhone.assignment.screen, 4);
+        assert.equal(restoredPhone.assignment.totalScreens, 4);
+        assert.deepEqual((await restoredPhone.initialAlignment).screens[4], screenFourSettings);
+
+        assert.equal((await emitAck(restoredController, 'screen-config:set', {
+            totalScreens: 4,
+            assignmentMode: 'manual'
+        })).ok, true);
+        const manualPhone = await connectClient(server.url);
+        clients.push(manualPhone);
+        const unassigned = nextEvent(manualPhone, 'device:unassigned');
+        manualPhone.emit('device:register', 'manual-phone');
+        assert.equal((await unassigned).screen, null);
+        assert.equal((await emitAck(restoredController, 'device:assign-screen', {
+            deviceId: 'manual-phone',
+            screen: '4'
+        })).ok, false);
+        assert.equal((await emitAck(restoredController, 'device:assign-screen', {
+            deviceId: 'manual-phone',
+            screen: 4
+        })).ok, false);
+        assert.equal((await emitAck(restoredController, 'device:assign-screen', {
+            deviceId: 'multi-phone-4',
+            screen: null
+        })).ok, true);
+
+        const assignmentUpdate = nextEvent(manualPhone, 'device:assignment-update');
+        assert.equal((await emitAck(restoredController, 'device:assign-screen', {
+            deviceId: 'manual-phone',
+            screen: 4
+        })).ok, true);
+        assert.equal((await assignmentUpdate).screen, 4);
+        assert.equal(JSON.parse(await readFile(server.calibrationFile, 'utf8')).assignments['manual-phone'], 4);
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients = [];
+        await server.close();
+
+        server = await startServer({ testDirectory });
+        const restoredManualPhone = await registerDevice(server.url, 'manual-phone');
+        clients.push(restoredManualPhone.socket);
+        assert.equal(restoredManualPhone.assignment.screen, 4);
+        assert.equal(restoredManualPhone.assignment.totalScreens, 4);
     } finally {
         for (const socket of clients) {
             socket.disconnect();
@@ -399,14 +542,7 @@ test('repairs corrupted calibration settings with safe defaults', async () => {
         await writeFile(calibrationFile, '{"calibrationEnabled":', 'utf8');
         server = await startServer({ testDirectory });
 
-        assert.deepEqual(JSON.parse(await readFile(calibrationFile, 'utf8')), {
-            calibrationEnabled: false,
-            presets: [],
-            screens: {
-                1: { horizontal: 0, vertical: 0, scale: 1 },
-                2: { horizontal: 0, vertical: 0, scale: 1 }
-            }
-        });
+        assert.deepEqual(JSON.parse(await readFile(calibrationFile, 'utf8')), storedSettings());
 
         const phone = await registerDevice(server.url, 'corrupt-settings-phone');
         try {
@@ -467,7 +603,7 @@ test('manages default and custom presets and restores saved presets and alignmen
         assert.ok(saveResult.presets.some((preset) =>
             preset.name === 'Center seam' && !preset.isDefault));
         assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).presets, [
-            { name: 'Center seam', screens: savedScreens }
+            { name: 'Center seam', screenCount: 2, screens: savedScreens }
         ]);
         assert.match((await emitAck(controller, 'preset:save', { name: 'center SEAM' })).message, /already exists/);
 
@@ -500,7 +636,8 @@ test('manages default and custom presets and restores saved presets and alignmen
 
         const deleteResult = await emitAck(controller, 'preset:delete', { name: 'Center seam' });
         assert.equal(deleteResult.ok, true);
-        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens, savedScreens);
+        const persistedAfterDelete = JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens;
+        assert.deepEqual({ 1: persistedAfterDelete[1], 2: persistedAfterDelete[2] }, savedScreens);
         assert.deepEqual(await emitAck(controller, 'preset:load', { name: 'Center seam' }), {
             ok: false,
             message: 'Preset not found'
@@ -514,9 +651,9 @@ test('manages default and custom presets and restores saved presets and alignmen
         await server.close();
 
         server = await startServer({ testDirectory });
-        const restartedPhoneOne = await registerDevice(server.url, 'preset-restart-phone-one');
+        const restartedPhoneOne = await registerDevice(server.url, 'preset-phone-one');
         clients.push(restartedPhoneOne.socket);
-        const restartedPhoneTwo = await registerDevice(server.url, 'preset-restart-phone-two');
+        const restartedPhoneTwo = await registerDevice(server.url, 'preset-phone-two');
         clients.push(restartedPhoneTwo.socket);
         assert.deepEqual((await restartedPhoneOne.initialAlignment).screens, savedScreens);
         assert.deepEqual((await restartedPhoneTwo.initialAlignment).screens, savedScreens);
@@ -533,7 +670,8 @@ test('manages default and custom presets and restores saved presets and alignmen
         assert.deepEqual(reset.screens, defaultPreset.screens);
         assert.deepEqual((await firstReset).screens, defaultPreset.screens);
         assert.deepEqual((await secondReset).screens, defaultPreset.screens);
-        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens, defaultPreset.screens);
+        const resetScreens = JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens;
+        assert.deepEqual({ 1: resetScreens[1], 2: resetScreens[2] }, defaultPreset.screens);
     } finally {
         for (const socket of clients) {
             socket.disconnect();
@@ -568,10 +706,14 @@ test('serializes concurrent settings changes and preserves valid settings while 
 
         server = await startServer({ testDirectory });
         const repaired = JSON.parse(await readFile(calibrationFile, 'utf8'));
-        assert.deepEqual(repaired.screens, {
+        assert.deepEqual({ 1: repaired.screens[1], 2: repaired.screens[2] }, {
             1: { horizontal: 18, vertical: 2, scale: 1 },
             2: { horizontal: -4, vertical: 7, scale: 0.99 }
         });
+        assert.deepEqual(
+            Object.fromEntries(Object.entries(repaired.screens).filter(([screen]) => Number(screen) > 2)),
+            Object.fromEntries(Object.entries(defaultScreens()).filter(([screen]) => Number(screen) > 2))
+        );
         assert.deepEqual(repaired.presets.map(({ name }) => name), ['Valid']);
 
         controller = await connectClient(server.url);
@@ -811,7 +953,7 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
 
         const third = await registerDevice(server.url, 'phone-three');
         clients.push(third.socket);
-        assert.match(third.rejection.message, /Both screens are assigned/);
+        assert.match(third.rejection.message, /All 2 screens are assigned/);
 
         const uploadedPng = await sharp({
             create: {
@@ -969,7 +1111,7 @@ test('allocates stable screens, rejects overflow, expires stale devices, and rec
         await waitForDisconnect(second.socket);
         await new Promise((resolve) => setTimeout(resolve, 160));
 
-        const replacement = await registerDevice(server.url, 'phone-three');
+        const replacement = await registerDevice(server.url, 'phone-one');
         clients.push(replacement.socket);
         assert.equal(replacement.assignment.screen, 1);
     } finally {

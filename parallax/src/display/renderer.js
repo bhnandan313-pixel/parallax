@@ -6,47 +6,48 @@ export function createContentRenderer({
     createImage = () => new Image()
 }) {
     let activeScreen = screen;
+    let totalScreens = 2;
     let displayedImage = container.querySelector('#panorama');
-   let latestRequest = 0;
-let calibrationEnabled = false;
-let calibrationOverlay = null;
-let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
+    let latestRequest = 0;
+    let calibrationEnabled = false;
+    let calibrationOverlay = null;
+    let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
 
-function ensureCalibrationOverlay() {
-    if (calibrationOverlay) {
-        return;
+    function ensureCalibrationOverlay() {
+        if (calibrationOverlay) {
+            return;
+        }
+
+        if (typeof document === 'undefined') {
+            return;
+        }
+
+        const overlay = document.createElement('div');
+
+        overlay.className = 'calibration-overlay';
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.hidden = true;
+        overlay.append(createCalibrationGrid());
+
+        calibrationOverlay = overlay;
     }
-
-    if (typeof document === 'undefined') {
-        return;
-    }
-
-    const overlay = document.createElement('div');
-
-    overlay.className = 'calibration-overlay';
-    overlay.setAttribute('aria-hidden', 'true');
-    overlay.hidden = true;
-    overlay.append(createCalibrationGrid());
-
-    calibrationOverlay = overlay;
-}
 
     function createCalibrationGrid() {
         const svgNamespace = 'http://www.w3.org/2000/svg';
         const svg = document.createElementNS(svgNamespace, 'svg');
+        const panoramaWidth = totalScreens * 1000;
 
-        svg.setAttribute('viewBox', '0 0 2000 1000');
+        svg.setAttribute('viewBox', `0 0 ${panoramaWidth} 1000`);
         svg.setAttribute('preserveAspectRatio', 'none');
         svg.setAttribute('class', 'calibration-grid');
 
-        // Vertical and horizontal grid lines.
-        for (let x = 0; x <= 2000; x += 100) {
+        for (let x = 0; x <= panoramaWidth; x += 100) {
             const line = document.createElementNS(svgNamespace, 'line');
             line.setAttribute('x1', x);
             line.setAttribute('y1', '0');
             line.setAttribute('x2', x);
             line.setAttribute('y2', '1000');
-            line.setAttribute('class', x === 1000
+            line.setAttribute('class', x > 0 && x < panoramaWidth && x % 1000 === 0
                 ? 'calibration-center-line'
                 : 'calibration-line');
 
@@ -57,16 +58,15 @@ function ensureCalibrationOverlay() {
             const line = document.createElementNS(svgNamespace, 'line');
             line.setAttribute('x1', '0');
             line.setAttribute('y1', y);
-            line.setAttribute('x2', '2000');
+            line.setAttribute('x2', panoramaWidth);
             line.setAttribute('y2', y);
             line.setAttribute('class', 'calibration-line');
 
             svg.append(line);
         }
 
-        // Numbered coordinate labels.
-        for (let x = 100; x < 2000; x += 100) {
-            for (let y = 100; y < 1000; y += 100) {
+        for (let x = 500; x < panoramaWidth; x += 500) {
+            for (let y = 500; y < 1000; y += 500) {
                 const label = document.createElementNS(svgNamespace, 'text');
                 label.setAttribute('x', x + 6);
                 label.setAttribute('y', y - 6);
@@ -81,25 +81,27 @@ function ensureCalibrationOverlay() {
     }
 
     function updateCalibrationPosition() {
-    if (!calibrationOverlay) {
-        return;
-    }
+        if (!calibrationOverlay) {
+            return;
+        }
 
-    calibrationOverlay.style.left = activeScreen === 1 ? '0' : '-100%';
-}
+        const offset = (activeScreen - 1) * 100;
+        calibrationOverlay.style.left = offset === 0 ? '0' : `-${offset}%`;
+        calibrationOverlay.style.width = `${totalScreens * 100}%`;
+    }
 
     function setCalibration(enabled) {
-    calibrationEnabled = Boolean(enabled);
+        calibrationEnabled = Boolean(enabled);
 
-    ensureCalibrationOverlay();
+        ensureCalibrationOverlay();
 
-    if (!calibrationOverlay) {
-        return;
+        if (!calibrationOverlay) {
+            return;
+        }
+
+        calibrationOverlay.hidden = !calibrationEnabled;
+        updateCalibrationPosition();
     }
-
-    calibrationOverlay.hidden = !calibrationEnabled;
-    updateCalibrationPosition();
-}
 
     function applyAlignment(image) {
         image.style.transformOrigin = '50% 50%';
@@ -127,7 +129,8 @@ function ensureCalibrationOverlay() {
                 return;
             }
 
-            image.style.left = activeScreen === 1 ? '0' : '-100%';
+            image.style.width = `${totalScreens * 100}%`;
+            image.style.left = activeScreen === 1 ? '0' : `${-(activeScreen - 1) * 100}%`;
             applyAlignment(image);
 
             if (displayedImage?.parentNode === container) {
@@ -138,15 +141,15 @@ function ensureCalibrationOverlay() {
 
             displayedImage = image;
 
-           ensureCalibrationOverlay();
+            ensureCalibrationOverlay();
 
-if (calibrationOverlay && calibrationOverlay.parentNode !== container) {
-    container.append(calibrationOverlay);
-}
+            if (calibrationOverlay && calibrationOverlay.parentNode !== container) {
+                container.append(calibrationOverlay);
+            }
 
-if (calibrationOverlay) {
-    calibrationOverlay.hidden = !calibrationEnabled;
-}
+            if (calibrationOverlay) {
+                calibrationOverlay.hidden = !calibrationEnabled;
+            }
 
             updateCalibrationPosition();
 
@@ -163,15 +166,16 @@ if (calibrationOverlay) {
     }
 
     render.setScreen = (nextScreen) => {
-        if (nextScreen !== 1 && nextScreen !== 2) {
-            throw new RangeError('Panorama screen must be 1 or 2');
+        if (!Number.isInteger(nextScreen) || nextScreen < 1 || nextScreen > totalScreens) {
+            throw new RangeError(`Panorama screen must be between 1 and ${totalScreens}`);
         }
 
         activeScreen = nextScreen;
 
         if (displayedImage) {
             displayedImage.alt = `Panorama screen ${activeScreen}`;
-            displayedImage.style.left = activeScreen === 1 ? '0' : '-100%';
+            displayedImage.style.left = activeScreen === 1 ? '0' : `${-(activeScreen - 1) * 100}%`;
+            displayedImage.style.width = `${totalScreens * 100}%`;
             applyAlignment(displayedImage);
         }
 
@@ -204,6 +208,24 @@ if (calibrationOverlay) {
     };
 
     render.setCalibration = setCalibration;
+
+    render.setScreenCount = (count) => {
+        if (!Number.isInteger(count) || count < 2 || count > 12) {
+            throw new RangeError('Panorama screen count must be between 2 and 12');
+        }
+        if (activeScreen > count) {
+            throw new RangeError('Assigned screen is outside the configured screen count');
+        }
+        totalScreens = count;
+        if (displayedImage) {
+            displayedImage.style.width = `${totalScreens * 100}%`;
+            displayedImage.style.left = activeScreen === 1 ? '0' : `${-(activeScreen - 1) * 100}%`;
+        }
+        if (calibrationOverlay) {
+            calibrationOverlay.replaceChildren(createCalibrationGrid());
+        }
+        updateCalibrationPosition();
+    };
 
     return render;
 }

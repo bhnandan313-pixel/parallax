@@ -11,6 +11,7 @@ export function mountController() {
         throw new Error('PARALLAX controller root was not found');
     }
 
+    document.documentElement.classList.add('controller-page');
     document.body.classList.add('controller-page');
     root.className = 'controller-root';
     root.innerHTML = `
@@ -85,18 +86,27 @@ export function mountController() {
                             </div>
                             <span class="device-count" data-device-count>0 <small>of 2</small></span>
                         </div>
-                        <div class="screen-list">
-                            <div class="screen-row" data-screen="1">
-                                <span class="screen-icon" aria-hidden="true">▣</span>
-                                <span class="screen-label"><strong>Screen 1</strong><small>Left panorama</small></span>
-                                <span class="screen-state"><i></i><span>Waiting</span></span>
-                            </div>
-                            <div class="screen-row" data-screen="2">
-                                <span class="screen-icon" aria-hidden="true">▣</span>
-                                <span class="screen-label"><strong>Screen 2</strong><small>Right panorama</small></span>
-                                <span class="screen-state"><i></i><span>Waiting</span></span>
-                            </div>
+                        <div class="screen-config-controls">
+                            <label>Screen count
+                                <select data-screen-count disabled>
+                                    ${Array.from({ length: 11 }, (_, index) =>
+                                        `<option value="${index + 2}">${index + 2}</option>`).join('')}
+                                </select>
+                            </label>
+                            <label>Assignment mode
+                                <select data-assignment-mode disabled>
+                                    <option value="automatic">Automatic</option>
+                                    <option value="manual">Manual</option>
+                                </select>
+                            </label>
+                            <button class="alignment-action" type="button" data-screen-config-save disabled>
+                                Apply configuration
+                            </button>
                         </div>
+                        <div class="screen-list" data-screen-list></div>
+                        <h3 class="device-list-heading">Registered devices</h3>
+                        <div class="device-assignment-list" data-device-assignment-list></div>
+                        <p class="alignment-status" data-assignment-status role="status" aria-live="polite"></p>
                         <p class="network-note" data-network-note>Waiting for phones to connect.</p>
                     </section>
 
@@ -124,13 +134,12 @@ export function mountController() {
                     </div>
                     <span id="calibration-status" class="status-badge">OFF</span>
                 </div>
-                <p class="card-description">Display a reference grid across both phones to check alignment.</p>
+                <p class="card-description">Display a reference grid across all configured phones to check alignment.</p>
                 <button id="calibration-toggle" class="publish-button" type="button">Enable Calibration</button>
                 <ol class="setup-steps" aria-label="Calibration setup steps">
-                    <li>Connect both phones</li>
+                    <li>Connect the phones</li>
                     <li>Enable calibration grid</li>
-                    <li>Align Screen 1</li>
-                    <li>Align Screen 2</li>
+                    <li>Align each screen</li>
                     <li>Check the center seam</li>
                     <li>Save a preset</li>
                     <li>Disable calibration grid</li>
@@ -152,30 +161,7 @@ export function mountController() {
                     <span>Fine adjustment</span>
                     <small>0.1 px / 0.001×</small>
                 </label>
-                <div class="alignment-grid">
-                    ${[1, 2].map((screen) => `
-                        <section class="alignment-screen" data-alignment-screen="${screen}">
-                            <div class="alignment-screen-heading">
-                                <h3>Screen ${screen}</h3>
-                                <button class="alignment-reset" type="button" data-alignment-reset="${screen}" disabled>
-                                    Reset Screen ${screen}
-                                </button>
-                            </div>
-                            <label class="alignment-control">
-                                <span>Horizontal <output data-alignment-value="horizontal">0 px</output></span>
-                                <input type="range" min="-50" max="50" step="1" value="0" data-alignment-axis="horizontal" disabled>
-                            </label>
-                            <label class="alignment-control">
-                                <span>Vertical <output data-alignment-value="vertical">0 px</output></span>
-                                <input type="range" min="-50" max="50" step="1" value="0" data-alignment-axis="vertical" disabled>
-                            </label>
-                            <label class="alignment-control">
-                                <span>Scale <output data-alignment-value="scale">1.00×</output></span>
-                                <input type="range" min="0.95" max="1.05" step="0.01" value="1" data-alignment-axis="scale" disabled>
-                            </label>
-                        </section>
-                    `).join('')}
-                </div>
+                <div class="alignment-grid" data-alignment-grid></div>
                 <div class="preset-controls">
                     <label class="preset-name-control">
                         <span>Save current alignment as preset</span>
@@ -213,19 +199,7 @@ export function mountController() {
                     <p>Alignment delivery: <strong data-diagnostics-delivery>Unknown</strong></p>
                     <p>Last server communication: <strong data-diagnostics-communication>Unknown</strong></p>
                 </div>
-                <div class="diagnostics-grid">
-                    ${[1, 2].map((screen) => `
-                        <article class="diagnostics-screen" data-diagnostics-screen="${screen}">
-                            <h3>Screen ${screen}</h3>
-                            <p>Connection: <strong data-diagnostic-connection>Unknown</strong></p>
-                            <p>Display: <strong data-diagnostic-display>Unknown</strong></p>
-                            <p>Alignment: <strong data-diagnostic-alignment>Unknown</strong></p>
-                            <p>Latest settings: <strong data-diagnostic-sync>Unknown</strong></p>
-                            <p>Last activity: <strong data-diagnostic-activity>Unknown</strong></p>
-                            <p>Image status: <strong data-diagnostic-image>Unknown</strong></p>
-                        </article>
-                    `).join('')}
-                </div>
+                <div class="diagnostics-grid" data-diagnostics-screens></div>
             </section>
 
             <footer class="controller-footer">
@@ -253,22 +227,89 @@ export function mountController() {
     const presetLoadButton = root.querySelector('[data-preset-load]');
     const presetDeleteButton = root.querySelector('[data-preset-delete]');
     const resetAllButton = root.querySelector('[data-reset-all]');
+    const screenCountSelect = root.querySelector('[data-screen-count]');
+    const assignmentModeSelect = root.querySelector('[data-assignment-mode]');
+    const screenConfigSaveButton = root.querySelector('[data-screen-config-save]');
+    const alignmentGrid = root.querySelector('[data-alignment-grid]');
+    const screenList = root.querySelector('[data-screen-list]');
+    const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
+    const assignmentStatus = root.querySelector('[data-assignment-status]');
+    const diagnosticsScreens = root.querySelector('[data-diagnostics-screens]');
     const socket = createParallaxSocket();
 
     let selectedFile = null;
     let previewUrl = null;
     let uploadRequest = null;
     let calibrationEnabled = false;
-    const alignmentByScreen = {
-        1: { horizontal: 0, vertical: 0, scale: 1 },
-        2: { horizontal: 0, vertical: 0, scale: 1 }
-    };
-    const alignmentRequestByScreen = { 1: 0, 2: 0 };
-    const pendingAlignmentTimers = { 1: null, 2: null };
+    let totalScreens = 2;
+    let assignmentMode = 'automatic';
+    let registeredDevices = [];
+    const alignmentByScreen = Object.fromEntries(
+        Array.from({ length: 12 }, (_, index) => [
+            index + 1,
+            { horizontal: 0, vertical: 0, scale: 1 }
+        ])
+    );
+    const alignmentRequestByScreen = Object.fromEntries(
+        Array.from({ length: 12 }, (_, index) => [index + 1, 0])
+    );
+    const pendingAlignmentTimers = Object.fromEntries(
+        Array.from({ length: 12 }, (_, index) => [index + 1, null])
+    );
     let presets = [];
     let diagnostics = null;
     let lastServerCommunication = null;
     let alignmentReady = false;
+
+    function renderScreenPanels() {
+        const screens = Array.from({ length: totalScreens }, (_, index) => index + 1);
+        screenList.innerHTML = screens.map((screen) => `
+            <div class="screen-row" data-screen="${screen}">
+                <span class="screen-icon" aria-hidden="true">▣</span>
+                <span class="screen-label"><strong>Screen ${screen}</strong><small>Panorama position ${screen} of ${totalScreens}</small></span>
+                <span class="screen-state"><i></i><span>Waiting</span></span>
+            </div>
+        `).join('');
+        alignmentGrid.innerHTML = screens.map((screen) => `
+            <section class="alignment-screen" data-alignment-screen="${screen}">
+                <div class="alignment-screen-heading">
+                    <h3>Screen ${screen}</h3>
+                    <button class="alignment-reset" type="button" data-alignment-reset="${screen}" disabled>
+                        Reset Screen ${screen}
+                    </button>
+                </div>
+                ${[
+                    ['horizontal', 'Horizontal', '-50', '50'],
+                    ['vertical', 'Vertical', '-50', '50'],
+                    ['scale', 'Scale', '0.95', '1.05']
+                ].map(([axis, label, min, max]) => `
+                    <label class="alignment-control">
+                        <span>${label} <output data-alignment-value="${axis}">0</output></span>
+                        <input type="range" min="${min}" max="${max}" step="1" value="0"
+                            data-screen="${screen}" data-alignment-axis="${axis}" disabled>
+                    </label>
+                `).join('')}
+            </section>
+        `).join('');
+        diagnosticsScreens.innerHTML = screens.map((screen) => `
+            <article class="diagnostics-screen" data-diagnostics-screen="${screen}">
+                <h3>Screen ${screen}</h3>
+                <p>Connection: <strong data-diagnostic-connection>Unknown</strong></p>
+                <p>Display: <strong data-diagnostic-display>Unknown</strong></p>
+                <p>Alignment: <strong data-diagnostic-alignment>Unknown</strong></p>
+                <p>Latest settings: <strong data-diagnostic-sync>Unknown</strong></p>
+                <p>Last activity: <strong data-diagnostic-activity>Unknown</strong></p>
+                <p>Image status: <strong data-diagnostic-image>Unknown</strong></p>
+            </article>
+        `).join('');
+        screenCountSelect.value = String(totalScreens);
+        assignmentModeSelect.value = assignmentMode;
+        renderAlignmentUI();
+        setDevices(registeredDevices);
+        if (diagnostics) {
+            setDiagnostics(diagnostics);
+        }
+    }
 
     function renderAlignmentScreen(screen) {
         const panel = root.querySelector(`[data-alignment-screen="${screen}"]`);
@@ -276,10 +317,13 @@ export function mountController() {
             return;
         }
 
-        const settings = alignmentByScreen[screen];
+        const settings = alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 };
         for (const axis of ['horizontal', 'vertical', 'scale']) {
             const input = panel.querySelector(`[data-alignment-axis="${axis}"]`);
             const output = panel.querySelector(`[data-alignment-value="${axis}"]`);
+            if (!input || !output) {
+                continue;
+            }
             input.value = String(settings[axis]);
             input.step = getAlignmentStep(axis, fineAdjustmentInput.checked);
             output.textContent = formatAlignmentValue(axis, settings[axis], fineAdjustmentInput.checked);
@@ -287,15 +331,20 @@ export function mountController() {
         }
         panel.querySelector('[data-alignment-reset]').disabled = !alignmentReady;
         const diagnosticsPanel = root.querySelector(`[data-diagnostics-screen="${screen}"]`);
-        diagnosticsPanel.querySelector('[data-diagnostic-alignment]').textContent =
-            `${settings.horizontal.toFixed(1)} px · ${settings.vertical.toFixed(1)} px · ${settings.scale.toFixed(3)}×`;
+        const diagnosticAlignment = diagnosticsPanel?.querySelector('[data-diagnostic-alignment]');
+        if (diagnosticAlignment) {
+            diagnosticAlignment.textContent =
+                `${settings.horizontal.toFixed(1)} px · ${settings.vertical.toFixed(1)} px · ${settings.scale.toFixed(3)}×`;
+        }
     }
 
     function renderAlignmentUI() {
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= totalScreens; screen += 1) {
             renderAlignmentScreen(screen);
         }
     }
+
+    renderScreenPanels();
 
     function updatePresetControls() {
         const selectedPreset = presets.find((preset) => preset.name === presetSelect.value);
@@ -396,7 +445,7 @@ export function mountController() {
     }
 
     function flushAlignment() {
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= totalScreens; screen += 1) {
             if (pendingAlignmentTimers[screen] !== null) {
                 sendAlignment(screen);
             }
@@ -431,27 +480,108 @@ export function mountController() {
 
     fineAdjustmentInput.addEventListener('change', renderAlignmentUI);
 
-    for (const screen of [1, 2]) {
-        const panel = root.querySelector(`[data-alignment-screen="${screen}"]`);
-        panel.querySelectorAll('[data-alignment-axis]').forEach((input) => {
-            input.addEventListener('input', () => {
-                const axis = input.dataset.alignmentAxis;
-                alignmentByScreen[screen][axis] = Number(input.value);
-                renderAlignmentScreen(screen);
-                queueAlignment(screen);
-            });
-            input.addEventListener('change', () => sendAlignment(screen));
-        });
-        panel.querySelector('[data-alignment-reset]').addEventListener('click', () => {
-            alignmentByScreen[screen] = {
-                horizontal: 0,
-                vertical: 0,
-                scale: 1
-            };
-            renderAlignmentScreen(screen);
-            sendAlignment(screen);
-        });
+    alignmentGrid.addEventListener('input', (event) => {
+        const input = event.target.closest('[data-alignment-axis]');
+        if (!input) {
+            return;
+        }
+        const screen = Number(input.dataset.screen);
+        const axis = input.dataset.alignmentAxis;
+        alignmentByScreen[screen][axis] = Number(input.value);
+        renderAlignmentScreen(screen);
+        queueAlignment(screen);
+    });
+    alignmentGrid.addEventListener('change', (event) => {
+        const input = event.target.closest('[data-alignment-axis]');
+        if (input) {
+            sendAlignment(Number(input.dataset.screen));
+        }
+    });
+    alignmentGrid.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-alignment-reset]');
+        if (!button) {
+            return;
+        }
+        const screen = Number(button.dataset.alignmentReset);
+        alignmentByScreen[screen] = { horizontal: 0, vertical: 0, scale: 1 };
+        renderAlignmentScreen(screen);
+        sendAlignment(screen);
+    });
+
+    function applyScreenConfiguration(configuration) {
+        if (!Number.isInteger(configuration?.totalScreens)
+            || configuration.totalScreens < 2 || configuration.totalScreens > 12
+            || !['automatic', 'manual'].includes(configuration.assignmentMode)) {
+            return;
+        }
+        totalScreens = configuration.totalScreens;
+        assignmentMode = configuration.assignmentMode;
+        if (configuration.screens && typeof configuration.screens === 'object') {
+            for (const screen of Object.keys(alignmentByScreen)) {
+                const settings = configuration.screens[screen];
+                if (settings
+                    && Number.isFinite(settings.horizontal)
+                    && Number.isFinite(settings.vertical)
+                    && Number.isFinite(settings.scale)) {
+                    alignmentByScreen[screen] = { ...settings };
+                }
+            }
+        }
+        renderScreenPanels();
+        screenConfigSaveButton.disabled = !socket.connected;
+        assignmentModeSelect.disabled = !socket.connected;
+        screenCountSelect.disabled = !socket.connected;
     }
+
+    screenConfigSaveButton.addEventListener('click', () => {
+        flushAlignment();
+        const requested = {
+            totalScreens: Number(screenCountSelect.value),
+            assignmentMode: assignmentModeSelect.value
+        };
+        screenConfigSaveButton.disabled = true;
+        socket.timeout(5000).emit('screen-config:set', requested, (error, response) => {
+            screenConfigSaveButton.disabled = !socket.connected;
+            if (error || !response?.ok) {
+                assignmentStatus.textContent = error
+                    ? 'The server did not acknowledge the screen configuration.'
+                    : response?.message || 'Unable to update screen configuration.';
+                assignmentStatus.classList.add('is-error');
+                screenCountSelect.value = String(totalScreens);
+                assignmentModeSelect.value = assignmentMode;
+                return;
+            }
+            assignmentStatus.classList.remove('is-error');
+            assignmentStatus.textContent =
+                `Configuration saved: ${response.totalScreens} screens, ${response.assignmentMode} assignment.`;
+            applyScreenConfiguration(response);
+        });
+    });
+
+    deviceAssignmentList.addEventListener('change', (event) => {
+        const select = event.target.closest('[data-device-assignment]');
+        if (!select) {
+            return;
+        }
+        const screen = select.value === '' ? null : Number(select.value);
+        socket.timeout(5000).emit('device:assign-screen', {
+            deviceId: select.dataset.deviceAssignment,
+            screen
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                assignmentStatus.textContent = error
+                    ? 'The server did not acknowledge the device assignment.'
+                    : response?.message || 'Unable to assign the device.';
+                assignmentStatus.classList.add('is-error');
+                setDevices(registeredDevices);
+                return;
+            }
+            assignmentStatus.classList.remove('is-error');
+            assignmentStatus.textContent = screen === null
+                ? `Device ${response.deviceId} is now unassigned.`
+                : `Device ${response.deviceId} assigned to Screen ${screen}.`;
+        });
+    });
 
     presetSelect.addEventListener('change', updatePresetControls);
     presetSaveButton.addEventListener('click', () => {
@@ -465,7 +595,7 @@ export function mountController() {
     presetLoadButton.addEventListener('click', () => {
         flushAlignment();
         emitControllerCommand('preset:load', { name: presetSelect.value }, (response) => {
-            for (const screen of [1, 2]) {
+            for (let screen = 1; screen <= totalScreens; screen += 1) {
                 alignmentByScreen[screen] = { ...response.screens[screen] };
             }
             renderAlignmentUI();
@@ -489,11 +619,11 @@ export function mountController() {
     resetAllButton.addEventListener('click', () => {
         flushAlignment();
         emitControllerCommand('preset:load', { name: 'Default' }, (response) => {
-            for (const screen of [1, 2]) {
+            for (let screen = 1; screen <= totalScreens; screen += 1) {
                 alignmentByScreen[screen] = { ...response.screens[screen] };
             }
             renderAlignmentUI();
-            alignmentStatus.textContent = 'Both screens reset to neutral alignment.';
+            alignmentStatus.textContent = `All ${totalScreens} screens reset to neutral alignment.`;
         });
     });
 
@@ -524,28 +654,55 @@ export function mountController() {
 
     function setDevices(devices) {
         markServerCommunication();
-        const devicesByScreen = new Map((Array.isArray(devices) ? devices : [])
+        registeredDevices = Array.isArray(devices) ? devices : [];
+        const devicesByScreen = new Map(registeredDevices
+            .filter((device) => Number.isInteger(device.screen))
             .map((device) => [device.screen, device]));
-        const activeScreens = new Set([...devicesByScreen.values()]
-            .filter((device) => device.socketId)
-            .map((device) => device.screen));
-        const count = activeScreens.size;
-        root.querySelector('[data-device-count]').innerHTML = `${count} <small>of 2</small>`;
-        root.querySelector('[data-network-note]').textContent = count === 2
-            ? 'Both displays are connected and ready.'
-            : count === 1
-                ? 'One display is connected. Waiting for the other screen.'
+        const count = registeredDevices.filter((device) => device.connected).length;
+        root.querySelector('[data-device-count]').innerHTML = `${count} <small>of ${totalScreens}</small>`;
+        root.querySelector('[data-network-note]').textContent = count === totalScreens
+            ? `All ${totalScreens} displays are connected and ready.`
+            : count > 0
+                ? `${count} of ${totalScreens} displays are connected.`
                 : 'Waiting for phones to connect.';
 
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= totalScreens; screen += 1) {
             const row = root.querySelector(`[data-screen="${screen}"]`);
+            if (!row) {
+                continue;
+            }
             const device = devicesByScreen.get(screen);
-            const connected = Boolean(device?.socketId);
+            const connected = Boolean(device?.connected);
             const state = connected ? 'Connected' : device ? 'Disconnected' : 'Waiting';
             row.classList.toggle('is-connected', connected);
             row.querySelector('.screen-state span').textContent = state;
             row.classList.toggle('is-disconnected', Boolean(device) && !connected);
         }
+
+        deviceAssignmentList.innerHTML = registeredDevices.length
+            ? registeredDevices.map((device) => `
+                <label class="device-assignment-row">
+                    <span><strong>${escapeHtml(device.id)}</strong><small>${device.connected ? 'Connected' : 'Disconnected'}</small></span>
+                    <select data-device-assignment="${escapeHtml(device.id)}" ${!socket.connected ? 'disabled' : ''}>
+                        <option value="" ${device.screen === null ? 'selected' : ''}>Unassigned</option>
+                        ${Array.from({ length: totalScreens }, (_, index) => {
+                            const screen = index + 1;
+                            return `<option value="${screen}" ${device.screen === screen ? 'selected' : ''}>Screen ${screen}</option>`;
+                        }).join('')}
+                    </select>
+                </label>
+            `).join('')
+            : '<p class="network-note">No registered devices.</p>';
+    }
+
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (character) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        })[character]);
     }
 
     function markServerCommunication() {
@@ -573,7 +730,8 @@ export function mountController() {
         root.querySelector('[data-diagnostics-backend]').textContent =
             snapshot.backendConnected === true ? 'Connected' : 'Unknown';
         root.querySelector('[data-diagnostics-count]').textContent =
-            Number.isInteger(snapshot.activeDeviceCount) ? `${snapshot.activeDeviceCount} of 2` : 'Unknown';
+            Number.isInteger(snapshot.activeDeviceCount)
+                ? `${snapshot.activeDeviceCount} of ${totalScreens}` : 'Unknown';
         const contentId = snapshot.currentContent?.updateId;
         root.querySelector('[data-diagnostics-content]').textContent = typeof contentId === 'string'
             ? `${contentId} · ${formatTimestamp(snapshot.contentUpdatedAt)}`
@@ -587,19 +745,23 @@ export function mountController() {
         const deviceStates = Array.isArray(snapshot.devices) ? snapshot.devices : [];
         const connectedDevices = deviceStates.filter((device) => device.status === 'connected');
         root.querySelector('[data-diagnostics-delivery]').textContent =
-            connectedDevices.length === 2 && connectedDevices.every((device) => device.alignmentSynced === true)
-                ? 'Both phones received the latest settings'
+            connectedDevices.length === totalScreens
+                && connectedDevices.every((device) => device.alignmentSynced === true)
+                ? 'All connected phones received the latest settings'
                 : connectedDevices.some((device) => device.alignmentSynced === false)
                     ? 'Waiting for phone confirmation'
                     : 'Unknown';
         root.querySelector('[data-diagnostics-updated]').textContent =
             `Updated ${formatTimestamp(lastServerCommunication)}`;
 
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= totalScreens; screen += 1) {
             const device = Array.isArray(snapshot.devices)
                 ? snapshot.devices.find((entry) => entry.screen === screen)
                 : null;
             const panel = root.querySelector(`[data-diagnostics-screen="${screen}"]`);
+            if (!panel) {
+                continue;
+            }
             const connectionStatus = device?.status;
             const displayStatus = device?.displayStatus;
             const displayError = device?.displayError;
@@ -759,17 +921,25 @@ export function mountController() {
         root.querySelector('[data-controller-connection-label]').textContent = 'Display system connected';
         root.querySelector('[data-diagnostics-socket]').textContent = 'Connected';
         calibrationButton.disabled = !socket.connected;
+        screenConfigSaveButton.disabled = false;
+        assignmentModeSelect.disabled = false;
+        screenCountSelect.disabled = false;
+        setDevices(registeredDevices);
         socket.emit('controller:register');
     });
     socket.on('disconnect', () => {
         alignmentReady = false;
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= 12; screen += 1) {
             clearTimeout(pendingAlignmentTimers[screen]);
             pendingAlignmentTimers[screen] = null;
         }
         renderAlignmentUI();
         updatePresetControls();
         calibrationButton.disabled = true;
+        screenConfigSaveButton.disabled = true;
+        assignmentModeSelect.disabled = true;
+        screenCountSelect.disabled = true;
+        setDevices(registeredDevices);
         root.querySelector('[data-controller-connection]').classList.remove('is-online');
         root.querySelector('[data-controller-connection-label]').textContent = 'Reconnecting to display system';
         root.querySelector('[data-diagnostics-socket]').textContent = 'Disconnected';
@@ -791,6 +961,8 @@ export function mountController() {
     });
     socket.on('devices:update', setDevices);
     socket.on('diagnostics:update', setDiagnostics);
+    socket.on('screen-config:current', applyScreenConfiguration);
+    socket.on('screen-config:update', applyScreenConfiguration);
     socket.on('presets:current', (state) => {
         markServerCommunication();
         setPresets(state?.presets);
@@ -814,9 +986,11 @@ export function mountController() {
             return;
         }
 
-        for (const screen of [1, 2]) {
-            const settings = screens[screen];
+        for (const [screenKey, settings] of Object.entries(screens)) {
+            const screen = Number(screenKey);
             if (!settings
+                || !Number.isInteger(screen)
+                || screen < 1 || screen > 12
                 || !Number.isFinite(settings.horizontal)
                 || settings.horizontal < -50
                 || settings.horizontal > 50
@@ -848,7 +1022,7 @@ export function mountController() {
 
     window.addEventListener('beforeunload', () => {
         socket.disconnect();
-        for (const screen of [1, 2]) {
+        for (let screen = 1; screen <= 12; screen += 1) {
             clearTimeout(pendingAlignmentTimers[screen]);
         }
         uploadRequest?.abort();

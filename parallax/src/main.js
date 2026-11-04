@@ -24,6 +24,7 @@ function startDisplay() {
     const statusHistory = [];
     let display = null;
     let assignedScreen = null;
+    let totalScreens = 2;
     let displayStatus = 'waiting';
     let displayError = null;
     let alignmentRevision = null;
@@ -63,7 +64,7 @@ function startDisplay() {
         if (state === 'ready') {
             displayStatus = 'ready';
             displayError = null;
-            const match = /^Display ready - Screen ([12])$/.exec(message);
+            const match = /^Display ready - Screen \d+$/.test(message);
             if (match) {
                 displayedUpdateId = latestUpdateId;
             }
@@ -95,22 +96,22 @@ function startDisplay() {
     showStatus('Connecting to server');
     socket = createParallaxSocket();
     let renderer = null;
-let calibrationEnabled = false;
+    let calibrationEnabled = false;
 
-    socket.on('connect', () => {
-        showStatus('Connected');
-        showStatus('Registering device');
-        socket.emit('device:register', deviceId);
-    });
-
-    socket.on('device:assigned', (assignment) => {
+    function handleAssignment(assignment) {
         const screen = assignment?.screen;
-        if (screen !== 1 && screen !== 2) {
+        const configuredCount = assignment?.totalScreens ?? totalScreens;
+        if (!Number.isInteger(configuredCount) || configuredCount < 2 || configuredCount > 12
+            || !Number.isInteger(screen) || screen < 1 || screen > configuredCount) {
             showStatus('Connection error: Server returned an invalid screen assignment', 'error');
             console.error('Invalid device assignment:', assignment);
             return;
         }
 
+        totalScreens = configuredCount;
+        if (assignment.alignment) {
+            alignmentByScreen[screen] = { ...assignment.alignment };
+        }
         assignedScreen = screen;
         displayStatus = 'waiting';
         displayError = null;
@@ -126,13 +127,63 @@ let calibrationEnabled = false;
                 screen,
                 onStatus: (message, state) => showStatus(message, state)
             });
+            renderer.setScreenCount(totalScreens);
             renderer.setCalibration(calibrationEnabled);
-            renderer.setAlignment(alignmentByScreen[screen]);
+            renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         } else {
+            renderer.setScreenCount(totalScreens);
             renderer.setScreen(screen);
-            renderer.setAlignment(alignmentByScreen[screen]);
+            renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         }
         reportDeviceStatus();
+    }
+
+    function handleUnassignment() {
+        assignedScreen = null;
+        display = null;
+        renderer = null;
+        alignmentRevision = null;
+        displayStatus = 'waiting';
+        showStatus('Waiting for a screen assignment');
+        app.replaceChildren(statusPanel);
+    }
+
+    socket.on('connect', () => {
+        showStatus('Connected');
+        showStatus('Registering device');
+        socket.emit('device:register', deviceId);
+    });
+
+    socket.on('device:assigned', handleAssignment);
+    socket.on('device:assignment-update', handleAssignment);
+    socket.on('device:unassigned', handleUnassignment);
+
+    socket.on('screen-config:update', (configuration) => {
+        const count = configuration?.totalScreens;
+        if (!Number.isInteger(count) || count < 2 || count > 12) {
+            return;
+        }
+        totalScreens = count;
+        const screens = configuration.screens;
+        if (screens && typeof screens === 'object') {
+            for (const [screenKey, settings] of Object.entries(screens)) {
+                const screen = Number(screenKey);
+                if (Number.isInteger(screen) && screen >= 1 && screen <= totalScreens
+                    && Number.isFinite(settings?.horizontal)
+                    && Number.isFinite(settings?.vertical)
+                    && Number.isFinite(settings?.scale)) {
+                    alignmentByScreen[screen] = { ...settings };
+                }
+            }
+        }
+        if (renderer && assignedScreen) {
+            try {
+                renderer.setScreenCount(totalScreens);
+                renderer.setAlignment(alignmentByScreen[assignedScreen]);
+            } catch (error) {
+                showStatus(`Connection error: ${error.message}`, 'error');
+            }
+        }
     });
 
     socket.on('content:update', (content) => {
@@ -162,8 +213,11 @@ let calibrationEnabled = false;
             return;
         }
 
-        for (const screen of [1, 2]) {
-            const settings = screens[screen];
+        for (const [screenKey, settings] of Object.entries(screens)) {
+            const screen = Number(screenKey);
+            if (!Number.isInteger(screen) || screen < 1 || screen > 12) {
+                continue;
+            }
             if (settings
                 && Number.isFinite(settings.horizontal)
                 && settings.horizontal >= -50
@@ -182,7 +236,7 @@ let calibrationEnabled = false;
             }
         }
 
-        if (renderer && (assignedScreen === 1 || assignedScreen === 2)) {
+        if (renderer && assignedScreen !== null) {
             if (!renderer.setAlignment(alignmentByScreen[assignedScreen])) {
                 displayStatus = 'error';
                 reportDeviceStatus();
