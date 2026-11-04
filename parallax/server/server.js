@@ -59,6 +59,7 @@ export function createParallaxServer({
         }
     });
     const devices = new Map();
+    const controllers = new Set();
     const positions = [1, 2];
     const deviceRoom = 'parallax:devices';
     const upload = multer({
@@ -75,6 +76,7 @@ export function createParallaxServer({
         imageUrl: '/panorama.jpg',
         updateId: 'default-panorama'
     };
+    let calibrationEnabled = false;
 
     function validateContent(content) {
         if (!content || typeof content !== 'object' || Array.isArray(content)
@@ -322,6 +324,9 @@ export function createParallaxServer({
                 screen: device.screen
             });
             socket.emit('content:update', currentContent);
+            socket.emit('calibration:update', {
+                enabled: calibrationEnabled
+            });
             console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
             broadcastDeviceSnapshot();
         });
@@ -350,12 +355,50 @@ export function createParallaxServer({
         });
 
         socket.on('controller:register', () => {
+            controllers.add(socket.id);
             socket.emit('content:current', currentContent);
+            socket.emit('calibration:current', {
+                enabled: calibrationEnabled
+            });
             broadcastDeviceSnapshot(socket);
+        });
+
+        socket.on('calibration:set', (state, acknowledge) => {
+            const respond = typeof acknowledge === 'function'
+                ? acknowledge
+                : () => {};
+
+            if (!controllers.has(socket.id)) {
+                respond({
+                    ok: false,
+                    message: 'Unauthorized calibration request'
+                });
+                return;
+            }
+
+            if (typeof state?.enabled !== 'boolean') {
+                respond({
+                    ok: false,
+                    message: 'Invalid calibration state'
+                });
+                return;
+            }
+
+            calibrationEnabled = state.enabled;
+
+            io.to(deviceRoom).emit('calibration:update', {
+                enabled: calibrationEnabled
+            });
+
+            respond({
+                ok: true,
+                enabled: calibrationEnabled
+            });
         });
 
         socket.on('disconnect', (reason) => {
             console.log(`Socket disconnected: ${socket.id} (${reason})`);
+            controllers.delete(socket.id);
 
             for (const [deviceId, device] of devices) {
                 if (device.socketId !== socket.id) {

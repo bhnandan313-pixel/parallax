@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createContentRenderer } from './content-renderer.js';
+import { createContentRenderer } from './renderer.js';
 
 class FakeImage {
     style = {};

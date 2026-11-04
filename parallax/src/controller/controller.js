@@ -1,4 +1,5 @@
-import { io } from 'socket.io-client';
+import { createParallaxSocket, getParallaxServerBaseUrl } from '../core/socket.js';
+import './controller.css';
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = /\.(jpe?g|png|webp)$/i;
@@ -114,6 +115,27 @@ export function mountController() {
                     </section>
                 </aside>
             </section>
+            <section class="controller-card calibration-card">
+    <div class="card-heading">
+        <div>
+            <span class="eyebrow">DISPLAY ALIGNMENT</span>
+            <h2>Calibration</h2>
+        </div>
+        <span id="calibration-status" class="status-badge">OFF</span>
+    </div>
+
+    <p class="card-description">
+        Display a reference grid across both phones to check alignment.
+    </p>
+
+    <button
+        id="calibration-toggle"
+        class="publish-button"
+        type="button"
+    >
+        Enable Calibration
+    </button>
+</section>
 
             <footer class="controller-footer">
                 <span>PARALLAX · Synchronized panoramic display</span>
@@ -130,14 +152,51 @@ export function mountController() {
     const publishButton = root.querySelector('[data-publish-button]');
     const publishStatus = root.querySelector('[data-publish-status]');
     const progress = root.querySelector('[data-upload-progress]');
-    const socket = io(`${location.protocol}//${location.hostname}:3001`, {
-        reconnection: true,
-        timeout: 15000
-    });
+    const calibrationButton = root.querySelector('#calibration-toggle');
+    const calibrationStatus = root.querySelector('#calibration-status');
+    const socket = createParallaxSocket();
 
     let selectedFile = null;
     let previewUrl = null;
     let uploadRequest = null;
+    let calibrationEnabled = false;
+
+    function updateCalibrationUI() {
+        if (calibrationButton) {
+            calibrationButton.textContent = calibrationEnabled
+                ? 'Disable Calibration'
+                : 'Enable Calibration';
+        }
+
+        if (calibrationStatus) {
+            calibrationStatus.textContent = calibrationEnabled ? 'ON' : 'OFF';
+        }
+    }
+
+    updateCalibrationUI();
+
+    calibrationButton?.addEventListener('click', () => {
+        calibrationButton.disabled = true;
+
+        socket.emit(
+            'calibration:set',
+            { enabled: !calibrationEnabled },
+            (response) => {
+                calibrationButton.disabled = false;
+
+                if (!response?.ok) {
+                    console.error(
+                        'Calibration update failed:',
+                        response?.message
+                    );
+                    return;
+                }
+
+                calibrationEnabled = response.enabled;
+                updateCalibrationUI();
+            }
+        );
+    });
 
     function setPublishStatus(message, state = '') {
         publishStatus.textContent = message;
@@ -247,7 +306,7 @@ export function mountController() {
         const formData = new FormData();
         formData.append('image', fileToUpload, fileToUpload.name);
         uploadRequest = new XMLHttpRequest();
-        uploadRequest.open('POST', `${location.protocol}//${location.hostname}:3001/api/upload`);
+        uploadRequest.open('POST', `${getParallaxServerBaseUrl()}/api/upload`);
         uploadRequest.upload.addEventListener('progress', (event) => {
             if (event.lengthComputable) {
                 setUploadProgress(Math.round((event.loaded / event.total) * 100));
@@ -319,6 +378,14 @@ export function mountController() {
             `Connection error: ${error.message}`;
     });
     socket.on('devices:update', setDevices);
+    socket.on('calibration:current', (state) => {
+        if (typeof state?.enabled !== 'boolean') {
+            return;
+        }
+
+        calibrationEnabled = state.enabled;
+        updateCalibrationUI();
+    });
     socket.on('content:current', (content) => {
         if (content?.contentType === 'image' && content.imageUrl) {
             setCurrentContent(content.imageUrl, 'Current panorama', 0, 0);

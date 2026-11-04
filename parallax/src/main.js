@@ -1,7 +1,8 @@
-import { io } from 'socket.io-client';
-import { createContentRenderer } from './content-renderer.js';
-import { mountController } from './controller.js';
-import './style.css';
+import { getOrCreateDeviceId } from './core/device.js';
+import { createParallaxSocket } from './core/socket.js';
+import { createContentRenderer } from './display/renderer.js';
+import { mountController } from './controller/controller.js';
+import './styles/main.css';
 
 if (location.pathname === '/controller' || location.pathname === '/controller/') {
     mountController();
@@ -38,29 +39,9 @@ function startDisplay() {
         }
     }
 
-    function createDeviceId() {
-        if (typeof crypto.randomUUID === 'function') {
-            return crypto.randomUUID();
-        }
-
-        if (typeof crypto.getRandomValues === 'function') {
-            const bytes = crypto.getRandomValues(new Uint8Array(16));
-            bytes[6] = (bytes[6] & 0x0f) | 0x40;
-            bytes[8] = (bytes[8] & 0x3f) | 0x80;
-            const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-            return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-        }
-
-        throw new Error('This browser does not support secure device ID generation');
-    }
-
     let deviceId;
     try {
-        deviceId = localStorage.getItem('parallax_device_id');
-        if (!deviceId) {
-            deviceId = createDeviceId();
-            localStorage.setItem('parallax_device_id', deviceId);
-        }
+        deviceId = getOrCreateDeviceId();
     } catch (error) {
         console.error('Unable to initialize the PARALLAX device ID:', error);
         showStatus(`Connection error: ${error.message}`, 'error');
@@ -71,11 +52,9 @@ function startDisplay() {
     }
 
     showStatus('Connecting to server');
-    const socket = io(`${location.protocol}//${location.hostname}:3001`, {
-        reconnection: true,
-        timeout: 15000
-    });
+    const socket = createParallaxSocket();
     let renderer = null;
+let calibrationEnabled = false;
 
     socket.on('connect', () => {
         showStatus('Connected');
@@ -103,6 +82,7 @@ function startDisplay() {
                 screen,
                 onStatus: showStatus
             });
+            renderer.setCalibration(calibrationEnabled);
         } else {
             renderer.setScreen(screen);
         }
@@ -115,6 +95,17 @@ function startDisplay() {
         }
         renderer(content);
     });
+    socket.on('calibration:update', (state) => {
+    if (typeof state?.enabled !== 'boolean') {
+        return;
+    }
+
+    calibrationEnabled = state.enabled;
+
+    if (renderer) {
+        renderer.setCalibration(calibrationEnabled);
+    }
+});
 
     socket.on('content:rejected', (result) => {
         const message = typeof result?.message === 'string'

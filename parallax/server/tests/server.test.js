@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { io as createSocket } from 'socket.io-client';
 import sharp from 'sharp';
-import { createParallaxServer } from './server.js';
+import { createParallaxServer } from '../server.js';
 
 async function startServer(options) {
     const uploadDirectory = await mkdtemp(join(tmpdir(), 'parallax-test-'));
@@ -39,6 +39,9 @@ function registerDevice(url, deviceId) {
         const initialContent = new Promise((resolve) => {
             socket.once('content:update', resolve);
         });
+        const initialCalibration = new Promise((resolve) => {
+            socket.once('calibration:update', resolve);
+        });
         const timer = setTimeout(() => {
             socket.disconnect();
             reject(new Error(`Timed out registering ${deviceId}`));
@@ -51,17 +54,99 @@ function registerDevice(url, deviceId) {
         });
         socket.once('device:assigned', (assignment) => {
             clearTimeout(timer);
-            resolve({ socket, assignment, initialContent });
+            resolve({ socket, assignment, initialContent, initialCalibration });
         });
         socket.once('device:rejected', (result) => {
             clearTimeout(timer);
-            resolve({ socket, rejection: result, initialContent });
+            resolve({ socket, rejection: result, initialContent, initialCalibration });
         });
         socket.on('connect', () => {
             socket.emit('device:register', deviceId);
         });
     });
 }
+
+test('authorizes calibration controllers and synchronizes current state to displays', async () => {
+    const server = await startServer({ reservationMs: 80 });
+    const clients = [];
+
+    try {
+        const first = await registerDevice(server.url, 'calibration-phone-one');
+        clients.push(first.socket);
+        assert.deepEqual(await first.initialCalibration, { enabled: false });
+
+        const second = await registerDevice(server.url, 'calibration-phone-two');
+        clients.push(second.socket);
+        assert.deepEqual(await second.initialCalibration, { enabled: false });
+
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const currentCalibration = nextEvent(controller, 'calibration:current');
+        controller.emit('controller:register');
+        assert.deepEqual(await currentCalibration, { enabled: false });
+
+        const enableFirst = nextEvent(first.socket, 'calibration:update');
+        const enableSecond = nextEvent(second.socket, 'calibration:update');
+        const enableResult = new Promise((resolve) => {
+            controller.emit('calibration:set', { enabled: true }, resolve);
+        });
+        assert.deepEqual(await enableFirst, { enabled: true });
+        assert.deepEqual(await enableSecond, { enabled: true });
+        assert.deepEqual(await enableResult, { ok: true, enabled: true });
+
+        const disableFirst = nextEvent(first.socket, 'calibration:update');
+        const disableSecond = nextEvent(second.socket, 'calibration:update');
+        const disableResult = new Promise((resolve) => {
+            controller.emit('calibration:set', { enabled: false }, resolve);
+        });
+        assert.deepEqual(await disableFirst, { enabled: false });
+        assert.deepEqual(await disableSecond, { enabled: false });
+        assert.deepEqual(await disableResult, { ok: true, enabled: false });
+
+        const enableAgainFirst = nextEvent(first.socket, 'calibration:update');
+        const enableAgainSecond = nextEvent(second.socket, 'calibration:update');
+        const enableAgainResult = new Promise((resolve) => {
+            controller.emit('calibration:set', { enabled: true }, resolve);
+        });
+        assert.deepEqual(await enableAgainFirst, { enabled: true });
+        assert.deepEqual(await enableAgainSecond, { enabled: true });
+        assert.deepEqual(await enableAgainResult, { ok: true, enabled: true });
+
+        await waitForDisconnect(first.socket);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const replacement = await registerDevice(server.url, 'calibration-phone-three');
+        clients.push(replacement.socket);
+        assert.equal(replacement.assignment.screen, 1);
+        assert.deepEqual(await replacement.initialCalibration, { enabled: true });
+
+        const unregistered = await connectClient(server.url);
+        clients.push(unregistered);
+        const unauthorizedResult = new Promise((resolve) => {
+            unregistered.emit('calibration:set', { enabled: false }, resolve);
+        });
+        assert.deepEqual(await unauthorizedResult, {
+            ok: false,
+            message: 'Unauthorized calibration request'
+        });
+
+        const invalidResult = new Promise((resolve) => {
+            controller.emit('calibration:set', { enabled: 'false' }, resolve);
+        });
+        assert.deepEqual(await invalidResult, {
+            ok: false,
+            message: 'Invalid calibration state'
+        });
+
+        const currentAfterRejections = nextEvent(controller, 'calibration:current');
+        controller.emit('controller:register');
+        assert.deepEqual(await currentAfterRejections, { enabled: true });
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
 
 function connectClient(url) {
     return new Promise((resolve, reject) => {
