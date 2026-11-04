@@ -58,7 +58,13 @@ Open the Vite URL printed in the terminal (normally <http://localhost:5173/>).
 
 Open the display page on up to two devices. Once they connect, use the controller to upload and publish an image, enable calibration, or adjust each screen's alignment. Supported uploads are JPG, PNG, and WebP files up to 15 MB.
 
-Calibration enabled state and each screen's alignment are stored in `server/data/calibration.json` and restored when the backend starts. The backend creates this file with default settings when it is missing; invalid or corrupted settings are logged and replaced with safe defaults.
+Calibration enabled state, both screen alignments, and named calibration presets are stored in `server/data/calibration.json` and restored when the backend starts. The backend creates this file with default settings when it is missing; invalid or corrupted settings are logged and repaired without discarding valid alignments. Writes use a serialized queue and atomic temporary-file replacement.
+
+The controller's calibration section includes the built-in **Default** preset, save/load/delete controls for custom presets (names are limited to 32 characters and must be unique), individual screen resets, a reset-all action, and a fine-adjustment toggle. Fine mode changes slider increments to 0.1 px and 0.001× without snapping current values. Preset deletion asks for confirmation and does not change current alignment.
+
+The **Diagnostics** section displays backend/socket connectivity, each screen's connection and reported display state, last device activity, current content status, and whether each connected phone has acknowledged the latest alignment revision. Status timestamps represent observed server/device activity, not a measured heartbeat.
+
+The backend adds Socket.IO events `presets:current`, `preset:save`, `preset:load`, `preset:delete`, `device:report`, and `diagnostics:update`. Preset modification events are restricted to registered controllers; phones report display state and alignment receipt without polling.
 
 ## Use devices on the same network
 

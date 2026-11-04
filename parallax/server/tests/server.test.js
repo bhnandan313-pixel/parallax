@@ -128,7 +128,7 @@ test('authorizes and synchronizes independent screen alignment settings', async 
                 settings: screenOneSettings
             }, resolve);
         });
-        const screenOnePayload = { screens: { ...defaults, 1: screenOneSettings } };
+        const screenOnePayload = { screens: { ...defaults, 1: screenOneSettings }, revision: 1 };
         assert.deepEqual(await firstUpdate, screenOnePayload);
         assert.deepEqual(await secondUpdate, screenOnePayload);
         assert.deepEqual(await screenOneResult, {
@@ -147,7 +147,8 @@ test('authorizes and synchronizes independent screen alignment settings', async 
             }, resolve);
         });
         const bothScreens = {
-            screens: { ...screenOnePayload.screens, 2: screenTwoSettings }
+            screens: { ...screenOnePayload.screens, 2: screenTwoSettings },
+            revision: 2
         };
         assert.deepEqual(await firstScreenTwoUpdate, bothScreens);
         assert.deepEqual(await secondScreenTwoUpdate, bothScreens);
@@ -304,6 +305,7 @@ test('creates default settings and restores calibration and independent alignmen
     const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-persistence-test-'));
     const defaultSettings = {
         calibrationEnabled: false,
+        presets: [],
         screens: {
             1: { horizontal: 0, vertical: 0, scale: 1 },
             2: { horizontal: 0, vertical: 0, scale: 1 }
@@ -337,6 +339,7 @@ test('creates default settings and restores calibration and independent alignmen
 
         const savedSettings = {
             calibrationEnabled: true,
+            presets: [],
             screens: { 1: screenOne, 2: screenTwo }
         };
         assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), savedSettings);
@@ -374,6 +377,7 @@ test('creates default settings and restores calibration and independent alignmen
         assert.deepEqual(resetResult, { ok: true, screen: 1, settings: resetSettings });
         assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')), {
             calibrationEnabled: true,
+            presets: [],
             screens: { 1: resetSettings, 2: screenTwo }
         });
     } finally {
@@ -397,6 +401,7 @@ test('repairs corrupted calibration settings with safe defaults', async () => {
 
         assert.deepEqual(JSON.parse(await readFile(calibrationFile, 'utf8')), {
             calibrationEnabled: false,
+            presets: [],
             screens: {
                 1: { horizontal: 0, vertical: 0, scale: 1 },
                 2: { horizontal: 0, vertical: 0, scale: 1 }
@@ -421,6 +426,297 @@ test('repairs corrupted calibration settings with safe defaults', async () => {
     }
 });
 
+test('manages default and custom presets and restores saved presets and alignment after restart', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-preset-test-'));
+    let server = await startServer({ testDirectory });
+    let clients = [];
+
+    try {
+        const firstPhone = await registerDevice(server.url, 'preset-phone-one');
+        clients.push(firstPhone.socket);
+        const secondPhone = await registerDevice(server.url, 'preset-phone-two');
+        clients.push(secondPhone.socket);
+
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialPresets = nextEvent(controller, 'presets:current');
+        controller.emit('controller:register');
+        const defaultPreset = (await initialPresets).presets[0];
+        assert.deepEqual(defaultPreset, {
+            name: 'Default',
+            isDefault: true,
+            screens: {
+                1: { horizontal: 0, vertical: 0, scale: 1 },
+                2: { horizontal: 0, vertical: 0, scale: 1 }
+            }
+        });
+
+        const savedScreens = {
+            1: { horizontal: 20.5, vertical: -10, scale: 1.025 },
+            2: { horizontal: -12, vertical: 15.5, scale: 0.975 }
+        };
+        for (const screen of [1, 2]) {
+            assert.equal((await emitAck(controller, 'alignment:set', {
+                screen,
+                settings: savedScreens[screen]
+            })).ok, true);
+        }
+
+        const saveResult = await emitAck(controller, 'preset:save', { name: 'Center seam' });
+        assert.equal(saveResult.ok, true);
+        assert.ok(saveResult.presets.some((preset) =>
+            preset.name === 'Center seam' && !preset.isDefault));
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).presets, [
+            { name: 'Center seam', screens: savedScreens }
+        ]);
+        assert.match((await emitAck(controller, 'preset:save', { name: 'center SEAM' })).message, /already exists/);
+
+        for (const name of ['', '   ', 'Default', `x${'a'.repeat(32)}`, 'bad\nname']) {
+            assert.equal((await emitAck(controller, 'preset:save', { name })).ok, false);
+        }
+        assert.equal((await emitAck(controller, 'preset:delete', { name: 'Default' })).ok, false);
+
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        for (const eventName of ['preset:save', 'preset:load', 'preset:delete']) {
+            const result = await emitAck(unauthorized, eventName, { name: 'Center seam' });
+            assert.equal(result.ok, false);
+            assert.match(result.message, /Unauthorized/);
+        }
+
+        for (const screen of [1, 2]) {
+            assert.equal((await emitAck(controller, 'alignment:set', {
+                screen,
+                settings: { horizontal: 0, vertical: 0, scale: 1 }
+            })).ok, true);
+        }
+
+        const firstLoad = nextEvent(firstPhone.socket, 'alignment:update');
+        const secondLoad = nextEvent(secondPhone.socket, 'alignment:update');
+        const loadResult = await emitAck(controller, 'preset:load', { name: 'Center seam' });
+        assert.deepEqual(loadResult.screens, savedScreens);
+        assert.deepEqual((await firstLoad).screens, savedScreens);
+        assert.deepEqual((await secondLoad).screens, savedScreens);
+
+        const deleteResult = await emitAck(controller, 'preset:delete', { name: 'Center seam' });
+        assert.equal(deleteResult.ok, true);
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens, savedScreens);
+        assert.deepEqual(await emitAck(controller, 'preset:load', { name: 'Center seam' }), {
+            ok: false,
+            message: 'Preset not found'
+        });
+
+        assert.equal((await emitAck(controller, 'preset:save', { name: 'Persisted fine' })).ok, true);
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients = [];
+        await server.close();
+
+        server = await startServer({ testDirectory });
+        const restartedPhoneOne = await registerDevice(server.url, 'preset-restart-phone-one');
+        clients.push(restartedPhoneOne.socket);
+        const restartedPhoneTwo = await registerDevice(server.url, 'preset-restart-phone-two');
+        clients.push(restartedPhoneTwo.socket);
+        assert.deepEqual((await restartedPhoneOne.initialAlignment).screens, savedScreens);
+        assert.deepEqual((await restartedPhoneTwo.initialAlignment).screens, savedScreens);
+
+        const restartedController = await connectClient(server.url);
+        clients.push(restartedController);
+        const restoredPresets = nextEvent(restartedController, 'presets:current');
+        restartedController.emit('controller:register');
+        assert.ok((await restoredPresets).presets.some((preset) => preset.name === 'Persisted fine'));
+
+        const firstReset = nextEvent(restartedPhoneOne.socket, 'alignment:update');
+        const secondReset = nextEvent(restartedPhoneTwo.socket, 'alignment:update');
+        const reset = await emitAck(restartedController, 'preset:load', { name: 'Default' });
+        assert.deepEqual(reset.screens, defaultPreset.screens);
+        assert.deepEqual((await firstReset).screens, defaultPreset.screens);
+        assert.deepEqual((await secondReset).screens, defaultPreset.screens);
+        assert.deepEqual(JSON.parse(await readFile(server.calibrationFile, 'utf8')).screens, defaultPreset.screens);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('serializes concurrent settings changes and preserves valid settings while repairing invalid presets', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-concurrent-settings-test-'));
+    const calibrationFile = join(testDirectory, 'data', 'calibration.json');
+    let server;
+    let controller;
+
+    try {
+        await mkdir(join(testDirectory, 'data'), { recursive: true });
+        await writeFile(calibrationFile, JSON.stringify({
+            calibrationEnabled: false,
+            screens: {
+                1: { horizontal: 18, vertical: 2, scale: 1 },
+                2: { horizontal: -4, vertical: 7, scale: 0.99 }
+            },
+            presets: [
+                { name: 'Valid', screens: {
+                    1: { horizontal: 1, vertical: 1, scale: 1 },
+                    2: { horizontal: 2, vertical: 2, scale: 1 }
+                } },
+                { name: 'Invalid', screens: { 1: {}, 2: {} } }
+            ]
+        }), 'utf8');
+
+        server = await startServer({ testDirectory });
+        const repaired = JSON.parse(await readFile(calibrationFile, 'utf8'));
+        assert.deepEqual(repaired.screens, {
+            1: { horizontal: 18, vertical: 2, scale: 1 },
+            2: { horizontal: -4, vertical: 7, scale: 0.99 }
+        });
+        assert.deepEqual(repaired.presets.map(({ name }) => name), ['Valid']);
+
+        controller = await connectClient(server.url);
+        controller.emit('controller:register');
+        const updates = [];
+        for (let index = 0; index < 24; index += 1) {
+            const screen = index % 2 + 1;
+            const settings = {
+                horizontal: index - 12,
+                vertical: 12 - index,
+                scale: 0.95 + (index % 11) / 100
+            };
+            updates.push(emitAck(controller, 'alignment:set', { screen, settings }));
+        }
+        for (let index = 0; index < 8; index += 1) {
+            updates.push(emitAck(controller, 'calibration:set', { enabled: index % 2 === 0 }));
+            updates.push(emitAck(controller, 'preset:save', { name: `Rapid ${index}` }));
+        }
+        const results = await Promise.all(updates);
+        assert.ok(results.every((result) => result.ok));
+
+        const persisted = JSON.parse(await readFile(calibrationFile, 'utf8'));
+        assert.equal(persisted.presets.length, 9);
+        assert.ok([1, 2].every((screen) =>
+            Number.isFinite(persisted.screens[screen].horizontal)
+            && Number.isFinite(persisted.screens[screen].vertical)
+            && Number.isFinite(persisted.screens[screen].scale)));
+        assert.equal(persisted.calibrationEnabled, false);
+    } finally {
+        controller?.disconnect();
+        if (server) {
+            await server.close();
+        }
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('publishes live device diagnostics and confirms alignment receipt per phone', async () => {
+    const server = await startServer();
+    const clients = [];
+
+    try {
+        const first = await registerDevice(server.url, 'diagnostics-phone-one');
+        clients.push(first.socket);
+        const second = await registerDevice(server.url, 'diagnostics-phone-two');
+        clients.push(second.socket);
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialDiagnostics = nextEvent(controller, 'diagnostics:update');
+        controller.emit('controller:register');
+        const initial = await initialDiagnostics;
+        assert.equal(initial.activeDeviceCount, 2);
+        assert.ok(initial.devices.every((device) =>
+            device.status === 'connected' && device.displayStatus === 'waiting'));
+
+        const reports = [first, second];
+        for (const phone of reports) {
+            const report = nextEvent(controller, 'diagnostics:update');
+            const alignment = await phone.initialAlignment;
+            phone.socket.emit('device:report', {
+                screen: phone.assignment.screen,
+                displayStatus: 'ready',
+                displayError: null,
+                loadedUpdateId: 'default-panorama',
+                alignmentRevision: alignment.revision
+            });
+            const update = await report;
+            const device = update.devices.find((entry) => entry.screen === phone.assignment.screen);
+            assert.equal(device.displayStatus, 'ready');
+            assert.equal(device.alignmentSynced, true);
+            assert.equal(device.loadedUpdateId, 'default-panorama');
+            assert.ok(device.lastActivity);
+        }
+
+        const firstAlignmentUpdate = nextEvent(first.socket, 'alignment:update');
+        const secondAlignmentUpdate = nextEvent(second.socket, 'alignment:update');
+        assert.equal((await emitAck(controller, 'alignment:set', {
+            screen: 1,
+            settings: { horizontal: 3, vertical: 0, scale: 1 }
+        })).ok, true);
+        const firstAlignmentState = await firstAlignmentUpdate;
+        const secondAlignmentState = await secondAlignmentUpdate;
+        assert.equal(firstAlignmentState.revision, secondAlignmentState.revision);
+
+        const firstReceipt = nextEvent(controller, 'diagnostics:update');
+        first.socket.emit('device:report', {
+            screen: 1,
+            displayStatus: 'ready',
+            displayError: null,
+            loadedUpdateId: 'default-panorama',
+            alignmentRevision: firstAlignmentState.revision
+        });
+        const firstReceiptState = await firstReceipt;
+        assert.equal(firstReceiptState.devices.find((device) => device.screen === 1).alignmentSynced, true);
+        assert.equal(firstReceiptState.devices.find((device) => device.screen === 2).alignmentSynced, false);
+
+        const secondReceipt = nextEvent(controller, 'diagnostics:update');
+        second.socket.emit('device:report', {
+            screen: 2,
+            displayStatus: 'ready',
+            displayError: null,
+            loadedUpdateId: 'default-panorama',
+            alignmentRevision: secondAlignmentState.revision
+        });
+        const secondReceiptState = await secondReceipt;
+        assert.ok(secondReceiptState.devices.every((device) => device.alignmentSynced));
+
+        const displayErrorUpdate = nextEvent(controller, 'diagnostics:update');
+        first.socket.emit('device:report', {
+            screen: 1,
+            displayStatus: 'error',
+            displayError: 'Panorama failed to load',
+            loadedUpdateId: 'default-panorama',
+            alignmentRevision: firstAlignmentState.revision
+        });
+        const displayErrorState = await displayErrorUpdate;
+        const firstDiagnostic = displayErrorState.devices.find((device) => device.screen === 1);
+        assert.equal(firstDiagnostic.displayStatus, 'error');
+        assert.equal(firstDiagnostic.displayError, 'Panorama failed to load');
+        assert.equal(firstDiagnostic.loadedUpdateId, 'default-panorama');
+
+        const disconnectedDiagnostics = nextEvent(controller, 'diagnostics:update');
+        await waitForDisconnect(first.socket);
+        const afterDisconnect = await disconnectedDiagnostics;
+        assert.equal(
+            afterDisconnect.devices.find((device) => device.screen === first.assignment.screen).status,
+            'disconnected'
+        );
+
+        const replacement = await registerDevice(server.url, 'diagnostics-phone-one');
+        clients.push(replacement.socket);
+        assert.equal(replacement.assignment.screen, first.assignment.screen);
+        assert.deepEqual((await replacement.initialAlignment).screens, {
+            ...initial.screens,
+            1: { horizontal: 3, vertical: 0, scale: 1 }
+        });
+        assert.deepEqual(await replacement.initialCalibration, { enabled: false });
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
 function connectClient(url) {
     return new Promise((resolve, reject) => {
         const socket = createSocket(url, {
@@ -429,6 +725,18 @@ function connectClient(url) {
         });
         socket.once('connect', () => resolve(socket));
         socket.once('connect_error', reject);
+    });
+}
+
+function emitAck(socket, eventName, payload) {
+    return new Promise((resolve) => {
+        socket.timeout(10_000).emit(eventName, payload, (error, response) => {
+            if (error) {
+                resolve({ ok: false, message: `Timed out waiting for ${eventName}` });
+                return;
+            }
+            resolve(response);
+        });
     });
 }
 

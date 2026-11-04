@@ -422,6 +422,18 @@ body.controller-page #app {
     font-size: 11px;
 }
 
+.alignment-status.is-error {
+    color: #fda4af;
+}
+
+.screen-row.is-disconnected .screen-state {
+    color: #fbbf24;
+}
+
+.screen-row.is-disconnected .screen-state i {
+    background: #fbbf24;
+}
+
 .controller-side {
     display: grid;
     align-content: start;
@@ -612,4 +624,126 @@ body.controller-page #app {
         flex-direction: column;
         gap: 7px;
     }
+}
+
+.setup-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 8px 18px;
+    margin: 20px 0 0;
+    padding-left: 22px;
+    color: #c7c3cf;
+    font-size: 11px;
+}
+
+.fine-adjustment-toggle {
+    display: flex;
+    width: fit-content;
+    margin-top: 16px;
+    align-items: center;
+    gap: 9px;
+    color: #e6e2eb;
+    font-size: 12px;
+}
+
+.fine-adjustment-toggle input {
+    accent-color: #a855f7;
+}
+
+.fine-adjustment-toggle small {
+    color: #898591;
+}
+
+.preset-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.preset-name-control,
+.preset-select-control {
+    display: grid;
+    gap: 7px;
+    color: #c7c3cf;
+    font-size: 11px;
+}
+
+.preset-name-control input,
+.preset-select-control select {
+    min-width: 0;
+    min-height: 36px;
+    padding: 0 10px;
+    border: 1px solid #393244;
+    border-radius: 7px;
+    background: #19181f;
+    color: #f4f2f8;
+    font: inherit;
+}
+
+.alignment-action {
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid #493b61;
+    border-radius: 7px;
+    background: #211a2d;
+    color: #d7c8f5;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.alignment-action.is-danger {
+    border-color: #633742;
+    color: #fda4af;
+}
+
+.alignment-action:disabled {
+    color: #827d89;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.diagnostics-card {
+    margin-top: 18px;
+}
+
+.diagnostics-summary,
+.diagnostics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.diagnostics-summary p,
+.diagnostics-screen {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #2a2731;
+    border-radius: 9px;
+    background: #19181f;
+    color: #aaa6b4;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.diagnostics-summary strong,
+.diagnostics-screen strong {
+    color: #e6e2eb;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.diagnostics-screen {
+    display: grid;
+    align-content: start;
+    gap: 7px;
+}
+
+.diagnostics-screen h3 {
+    margin-bottom: 3px;
+    color: #d7c8f5;
+    font-size: 12px;
 }

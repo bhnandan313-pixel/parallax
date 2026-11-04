@@ -24,10 +24,28 @@ function startDisplay() {
     const statusHistory = [];
     let display = null;
     let assignedScreen = null;
+    let displayStatus = 'waiting';
+    let displayError = null;
+    let alignmentRevision = null;
+    let displayedUpdateId = null;
+    let socket = null;
     const alignmentByScreen = {
         1: { horizontal: 0, vertical: 0, scale: 1 },
         2: { horizontal: 0, vertical: 0, scale: 1 }
     };
+
+    function reportDeviceStatus() {
+        if (!socket?.connected || !assignedScreen) {
+            return;
+        }
+        socket.emit('device:report', {
+            screen: assignedScreen,
+            displayStatus,
+            displayError,
+            loadedUpdateId: displayedUpdateId,
+            alignmentRevision
+        });
+    }
 
     function showStatus(message, state = 'info') {
         statusHistory.push(message);
@@ -42,8 +60,26 @@ function startDisplay() {
         if (!statusPanel.isConnected) {
             app.replaceChildren(statusPanel);
         }
+        if (state === 'ready') {
+            displayStatus = 'ready';
+            displayError = null;
+            const match = /^Display ready - Screen ([12])$/.exec(message);
+            if (match) {
+                displayedUpdateId = latestUpdateId;
+            }
+            reportDeviceStatus();
+        } else if (state === 'error') {
+            displayStatus = 'error';
+            displayError = message.slice(0, 200);
+            reportDeviceStatus();
+        } else if (message === 'Loading panorama') {
+            displayStatus = 'loading';
+            displayError = null;
+            reportDeviceStatus();
+        }
     }
 
+    let latestUpdateId = null;
     let deviceId;
     try {
         deviceId = getOrCreateDeviceId();
@@ -57,7 +93,7 @@ function startDisplay() {
     }
 
     showStatus('Connecting to server');
-    const socket = createParallaxSocket();
+    socket = createParallaxSocket();
     let renderer = null;
 let calibrationEnabled = false;
 
@@ -76,6 +112,8 @@ let calibrationEnabled = false;
         }
 
         assignedScreen = screen;
+        displayStatus = 'waiting';
+        displayError = null;
         showStatus(`Device assigned - Screen ${screen}`);
         if (!display) {
             display = document.createElement('main');
@@ -86,7 +124,7 @@ let calibrationEnabled = false;
                 container: display,
                 statusPanel,
                 screen,
-                onStatus: showStatus
+                onStatus: (message, state) => showStatus(message, state)
             });
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen]);
@@ -94,6 +132,7 @@ let calibrationEnabled = false;
             renderer.setScreen(screen);
             renderer.setAlignment(alignmentByScreen[screen]);
         }
+        reportDeviceStatus();
     });
 
     socket.on('content:update', (content) => {
@@ -101,6 +140,7 @@ let calibrationEnabled = false;
             console.error('Received content before device assignment:', content);
             return;
         }
+        latestUpdateId = content?.updateId ?? null;
         renderer(content);
     });
     socket.on('calibration:update', (state) => {
@@ -113,6 +153,7 @@ let calibrationEnabled = false;
     if (renderer) {
         renderer.setCalibration(calibrationEnabled);
     }
+    reportDeviceStatus();
 });
 
     socket.on('alignment:update', (state) => {
@@ -142,8 +183,16 @@ let calibrationEnabled = false;
         }
 
         if (renderer && (assignedScreen === 1 || assignedScreen === 2)) {
-            renderer.setAlignment(alignmentByScreen[assignedScreen]);
+            if (!renderer.setAlignment(alignmentByScreen[assignedScreen])) {
+                displayStatus = 'error';
+                reportDeviceStatus();
+                return;
+            }
         }
+        if (Number.isInteger(state.revision) && state.revision >= 0) {
+            alignmentRevision = state.revision;
+        }
+        reportDeviceStatus();
     });
 
     socket.on('content:rejected', (result) => {
@@ -167,6 +216,8 @@ let calibrationEnabled = false;
 
     socket.on('disconnect', (reason) => {
         showStatus(`Connecting to server - disconnected: ${reason}`);
+        displayStatus = 'waiting';
+        alignmentRevision = null;
     });
 
     socket.io.on('reconnect_attempt', () => {
@@ -177,4 +228,6 @@ let calibrationEnabled = false;
         showStatus(`Connection error: ${error.message}`, 'error');
         console.error('Socket.IO reconnection error:', error);
     });
+
+    window.addEventListener('pagehide', () => socket.disconnect(), { once: true });
 }

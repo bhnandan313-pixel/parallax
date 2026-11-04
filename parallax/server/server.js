@@ -13,6 +13,9 @@ import { Server } from 'socket.io';
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 50_000_000;
 const MAX_IMAGE_DIMENSION = 16_384;
+const MAX_PRESET_NAME_LENGTH = 32;
+const DEFAULT_PRESET_NAME = 'Default';
+const DISPLAY_STATES = new Set(['waiting', 'loading', 'ready', 'error']);
 const IMAGE_FORMATS = new Map([
     ['image/jpeg', { extension: 'jpg', sharpFormat: 'jpeg' }],
     ['image/png', { extension: 'png', sharpFormat: 'png' }],
@@ -77,14 +80,22 @@ export function createParallaxServer({
         imageUrl: '/panorama.jpg',
         updateId: 'default-panorama'
     };
+    let contentUpdatedAt = null;
+    let alignmentUpdatedAt = null;
     let calibrationEnabled = false;
     const alignmentSettings = createDefaultAlignmentSettings();
+    let calibrationPresets = [];
+    let alignmentRevision = 0;
     let settingsUpdateQueue = Promise.resolve();
 
     function getSettingsSnapshot() {
         return {
             calibrationEnabled,
-            screens: getAlignmentSnapshot()
+            screens: getAlignmentSnapshot(),
+            presets: calibrationPresets.map(({ name, screens }) => ({
+                name,
+                screens: { 1: { ...screens[1] }, 2: { ...screens[2] } }
+            }))
         };
     }
 
@@ -114,10 +125,7 @@ export function createParallaxServer({
                 throw error;
             }
 
-            const defaults = {
-                calibrationEnabled: false,
-                screens: createDefaultAlignmentSettings()
-            };
+            const defaults = createDefaultSettings();
             await writeSettings(defaults);
             return defaults;
         }
@@ -131,20 +139,39 @@ export function createParallaxServer({
                 throw error;
             }
             console.warn(`Calibration settings are corrupted; restoring defaults from ${calibrationFile}`);
-            settings = {
-                calibrationEnabled: false,
-                screens: createDefaultAlignmentSettings()
-            };
+            settings = createDefaultSettings();
             shouldRepair = true;
         }
 
         if (!isValidStoredSettings(settings)) {
             console.warn(`Calibration settings are invalid; restoring defaults from ${calibrationFile}`);
-            settings = {
-                calibrationEnabled: false,
-                screens: createDefaultAlignmentSettings()
-            };
+            settings = createDefaultSettings();
             shouldRepair = true;
+        } else {
+            const presets = Array.isArray(settings.presets) ? settings.presets : [];
+            const validPresets = [];
+            const names = new Set();
+            for (const preset of presets) {
+                if (!isValidStoredPreset(preset)
+                    || preset.name.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()
+                    || names.has(preset.name.toLowerCase())) {
+                    shouldRepair = true;
+                    continue;
+                }
+                names.add(preset.name.toLowerCase());
+                validPresets.push(preset);
+            }
+            if (settings.presets !== undefined && !Array.isArray(settings.presets)) {
+                shouldRepair = true;
+            }
+            settings = {
+                calibrationEnabled: settings.calibrationEnabled,
+                screens: {
+                    1: { ...settings.screens[1] },
+                    2: { ...settings.screens[2] }
+                },
+                presets: validPresets
+            };
         }
 
         if (shouldRepair) {
@@ -158,6 +185,7 @@ export function createParallaxServer({
         calibrationEnabled = settings.calibrationEnabled;
         alignmentSettings[1] = { ...settings.screens[1] };
         alignmentSettings[2] = { ...settings.screens[2] };
+        calibrationPresets = settings.presets ?? [];
     });
 
     function updateSettings(update) {
@@ -173,6 +201,7 @@ export function createParallaxServer({
                     calibrationEnabled = previous.calibrationEnabled;
                     alignmentSettings[1] = previous.screens[1];
                     alignmentSettings[2] = previous.screens[2];
+                    calibrationPresets = previous.presets;
                     throw error;
                 }
             }
@@ -243,6 +272,76 @@ export function createParallaxServer({
             screen,
             socketId
         }));
+    }
+
+    function getPresetsSnapshot() {
+        return [
+            {
+                name: DEFAULT_PRESET_NAME,
+                isDefault: true,
+                screens: createDefaultAlignmentSettings()
+            },
+            ...calibrationPresets.map(({ name, screens }) => ({
+                name,
+                isDefault: false,
+                screens: { 1: { ...screens[1] }, 2: { ...screens[2] } }
+            }))
+        ];
+    }
+
+    function getDiagnosticsSnapshot() {
+        const activeDevices = [...devices.values()];
+        return {
+            backendConnected: true,
+            activeDeviceCount: activeDevices.filter(({ socketId }) => socketId !== null).length,
+            currentContent: { ...currentContent },
+            contentUpdatedAt,
+            calibrationEnabled,
+            screens: getAlignmentSnapshot(),
+            alignmentRevision,
+            alignmentUpdatedAt,
+            devices: [1, 2].map((screen) => {
+                const device = activeDevices.find((entry) => entry.screen === screen);
+                return {
+                    screen,
+                    status: !device ? 'waiting' : device.socketId ? 'connected' : 'disconnected',
+                    displayStatus: device?.displayStatus ?? 'unknown',
+                    displayError: device?.displayError ?? null,
+                    lastActivity: device?.lastActivity ?? null,
+                    loadedUpdateId: device?.loadedUpdateId ?? null,
+                    alignmentSynced: device?.socketId
+                        ? device.reportedAlignmentRevision === alignmentRevision
+                        : null
+                };
+            })
+        };
+    }
+
+    function broadcastDiagnostics() {
+        const snapshot = getDiagnosticsSnapshot();
+        for (const controllerId of controllers) {
+            io.sockets.sockets.get(controllerId)?.emit('diagnostics:update', snapshot);
+        }
+    }
+
+    function broadcastPresets() {
+        const payload = { presets: getPresetsSnapshot() };
+        for (const controllerId of controllers) {
+            io.sockets.sockets.get(controllerId)?.emit('presets:current', payload);
+        }
+    }
+
+    function broadcastAlignment(screens = getAlignmentSnapshot(), sourceControllerId = null) {
+        alignmentRevision += 1;
+        alignmentUpdatedAt = new Date().toISOString();
+        const payload = { screens, revision: alignmentRevision };
+        io.to(deviceRoom).emit('alignment:update', payload);
+        for (const controllerId of controllers) {
+            if (controllerId !== sourceControllerId) {
+                io.sockets.sockets.get(controllerId)?.emit('alignment:current', payload);
+            }
+        }
+        broadcastDiagnostics();
     }
 
     function broadcastDeviceSnapshot(target = io) {
@@ -385,8 +484,10 @@ export function createParallaxServer({
             };
 
             currentContent = content;
+            contentUpdatedAt = new Date().toISOString();
             console.log(`Image uploaded and published: ${filename} | ${metadata.width}x${metadata.height}`);
             io.to(deviceRoom).emit('content:update', content);
+            broadcastDiagnostics();
 
             res.status(201).json({
                 ...content,
@@ -436,7 +537,17 @@ export function createParallaxServer({
                     return;
                 }
 
-                device = { id: deviceId, screen, socketId: null, disconnectTimer: null };
+                device = {
+                    id: deviceId,
+                    screen,
+                    socketId: null,
+                    disconnectTimer: null,
+                    displayStatus: 'waiting',
+                    displayError: null,
+                    lastActivity: null,
+                    loadedUpdateId: null,
+                    reportedAlignmentRevision: null
+                };
                 devices.set(deviceId, device);
             }
 
@@ -462,10 +573,12 @@ export function createParallaxServer({
                 enabled: calibrationEnabled
             });
             socket.emit('alignment:update', {
-                screens: getAlignmentSnapshot()
+                screens: getAlignmentSnapshot(),
+                revision: alignmentRevision
             });
             console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
             broadcastDeviceSnapshot();
+            broadcastDiagnostics();
         });
 
         socket.on('content:update', (content, acknowledge) => {
@@ -486,8 +599,10 @@ export function createParallaxServer({
                 imageUrl: content.imageUrl,
                 updateId: content.updateId
             };
+            contentUpdatedAt = new Date().toISOString();
             console.log(`Content updated: ${currentContent.updateId} | ${currentContent.imageUrl}`);
             io.to(deviceRoom).emit('content:update', currentContent);
+            broadcastDiagnostics();
             respond({ ok: true, updateId: currentContent.updateId });
         });
 
@@ -500,7 +615,46 @@ export function createParallaxServer({
             socket.emit('alignment:current', {
                 screens: getAlignmentSnapshot()
             });
+            socket.emit('presets:current', { presets: getPresetsSnapshot() });
+            socket.emit('diagnostics:update', getDiagnosticsSnapshot());
             broadcastDeviceSnapshot(socket);
+        });
+
+        socket.on('device:report', (report) => {
+            if (!report || typeof report !== 'object' || Array.isArray(report)
+                || !Number.isInteger(report.screen)
+                || !DISPLAY_STATES.has(report.displayStatus)
+                || (report.alignmentRevision !== null
+                    && (!Number.isInteger(report.alignmentRevision)
+                        || report.alignmentRevision < 0
+                        || report.alignmentRevision > alignmentRevision))
+                || (report.loadedUpdateId !== null
+                    && (typeof report.loadedUpdateId !== 'string'
+                        || report.loadedUpdateId.length > 128))
+                || (report.displayError !== null
+                    && report.displayError !== undefined
+                    && (typeof report.displayError !== 'string'
+                        || report.displayError.length > 200))) {
+                return;
+            }
+
+            const device = [...devices.values()].find(({ socketId }) => socketId === socket.id);
+            if (!device || device.screen !== report.screen) {
+                return;
+            }
+
+            device.displayStatus = report.displayStatus;
+            device.displayError = report.displayStatus === 'error'
+                ? (report.displayError ?? null)
+                : null;
+            if (report.displayStatus === 'ready' && report.loadedUpdateId) {
+                device.loadedUpdateId = report.loadedUpdateId;
+            }
+            if (report.alignmentRevision !== null) {
+                device.reportedAlignmentRevision = report.alignmentRevision;
+            }
+            device.lastActivity = new Date().toISOString();
+            broadcastDiagnostics();
         });
 
         socket.on('calibration:set', async (state, acknowledge) => {
@@ -524,8 +678,9 @@ export function createParallaxServer({
                 return;
             }
 
+            let settings;
             try {
-                await updateSettings(() => {
+                settings = await updateSettings(() => {
                     calibrationEnabled = state.enabled;
                 });
             } catch (error) {
@@ -538,12 +693,18 @@ export function createParallaxServer({
             }
 
             io.to(deviceRoom).emit('calibration:update', {
-                enabled: calibrationEnabled
+                enabled: settings.calibrationEnabled
             });
+            for (const controllerId of controllers) {
+                io.sockets.sockets.get(controllerId)?.emit('calibration:current', {
+                    enabled: settings.calibrationEnabled
+                });
+            }
+            broadcastDiagnostics();
 
             respond({
                 ok: true,
-                enabled: calibrationEnabled
+                enabled: settings.calibrationEnabled
             });
         });
 
@@ -568,8 +729,9 @@ export function createParallaxServer({
                 return;
             }
 
+            let settings;
             try {
-                await updateSettings(() => {
+                settings = await updateSettings(() => {
                     alignmentSettings[state.screen] = {
                         horizontal: state.settings.horizontal,
                         vertical: state.settings.vertical,
@@ -584,14 +746,135 @@ export function createParallaxServer({
                 });
                 return;
             }
-            const screens = getAlignmentSnapshot();
+            const screens = settings.screens;
 
-            io.to(deviceRoom).emit('alignment:update', { screens });
+            broadcastAlignment(screens, socket.id);
             respond({
                 ok: true,
                 screen: state.screen,
                 settings: screens[state.screen]
             });
+        });
+
+        socket.on('preset:save', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized preset request' });
+                return;
+            }
+
+            const name = validatePresetName(request?.name);
+            if (!name || name.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()) {
+                respond({
+                    ok: false,
+                    message: `Preset names must be 1-${MAX_PRESET_NAME_LENGTH} characters and cannot use the reserved name "Default".`
+                });
+                return;
+            }
+
+            try {
+                await updateSettings(() => {
+                    if (calibrationPresets.some((preset) =>
+                        preset.name.toLowerCase() === name.toLowerCase())) {
+                        throw new Error(`A preset named "${name}" already exists.`);
+                    }
+                    calibrationPresets = [
+                        ...calibrationPresets,
+                        { name, screens: getAlignmentSnapshot() }
+                    ];
+                });
+            } catch (error) {
+                if (error.message.includes('already exists')) {
+                    respond({ ok: false, message: error.message });
+                    return;
+                }
+                console.error('Unable to persist calibration preset:', error);
+                respond({ ok: false, message: 'Unable to save preset settings' });
+                return;
+            }
+
+            broadcastPresets();
+            respond({ ok: true, presets: getPresetsSnapshot() });
+        });
+
+        socket.on('preset:load', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized preset request' });
+                return;
+            }
+
+            if (typeof request?.name !== 'string') {
+                respond({ ok: false, message: 'Invalid preset name' });
+                return;
+            }
+
+            const name = request.name.trim();
+            const preset = name.toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()
+                ? { name: DEFAULT_PRESET_NAME, screens: createDefaultAlignmentSettings() }
+                : calibrationPresets.find((entry) =>
+                    entry.name.toLowerCase() === name.toLowerCase());
+            if (!preset) {
+                respond({ ok: false, message: 'Preset not found' });
+                return;
+            }
+
+            let settings;
+            try {
+                settings = await updateSettings(() => {
+                    alignmentSettings[1] = { ...preset.screens[1] };
+                    alignmentSettings[2] = { ...preset.screens[2] };
+                });
+            } catch (error) {
+                console.error('Unable to persist loaded calibration preset:', error);
+                respond({ ok: false, message: 'Unable to load preset settings' });
+                return;
+            }
+
+            broadcastAlignment(settings.screens, socket.id);
+            respond({ ok: true, name: preset.name, screens: settings.screens });
+        });
+
+        socket.on('preset:delete', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized preset request' });
+                return;
+            }
+
+            if (typeof request?.name !== 'string'
+                || request.name.trim().toLowerCase() === DEFAULT_PRESET_NAME.toLowerCase()) {
+                respond({ ok: false, message: 'The Default preset cannot be deleted' });
+                return;
+            }
+
+            const name = request.name.trim();
+            let deleted = false;
+            try {
+                await updateSettings(() => {
+                    const matchingPreset = calibrationPresets.find((preset) =>
+                        preset.name.toLowerCase() === name.toLowerCase());
+                    if (!matchingPreset) {
+                        throw new Error('Preset not found');
+                    }
+                    calibrationPresets = calibrationPresets.filter((preset) =>
+                        preset !== matchingPreset);
+                    deleted = true;
+                });
+            } catch (error) {
+                if (error.message === 'Preset not found') {
+                    respond({ ok: false, message: error.message });
+                    return;
+                }
+                console.error('Unable to persist preset deletion:', error);
+                respond({ ok: false, message: 'Unable to delete preset' });
+                return;
+            }
+
+            if (deleted) {
+                broadcastPresets();
+            }
+            respond({ ok: true, presets: getPresetsSnapshot() });
         });
 
         socket.on('disconnect', (reason) => {
@@ -612,10 +895,13 @@ export function createParallaxServer({
                     devices.delete(deviceId);
                     console.log(`Device reservation expired: ${deviceId} | Screen ${device.screen}`);
                     broadcastDeviceSnapshot();
+                    broadcastDiagnostics();
                 }, reservationMs);
                 device.disconnectTimer.unref?.();
                 console.log(`Device reservation retained for ${reservationMs}ms: ${deviceId} | Screen ${device.screen}`);
             }
+            broadcastDeviceSnapshot();
+            broadcastDiagnostics();
         });
     });
 
@@ -656,6 +942,25 @@ function createDefaultAlignmentSettings() {
     };
 }
 
+function createDefaultSettings() {
+    return {
+        calibrationEnabled: false,
+        screens: createDefaultAlignmentSettings(),
+        presets: []
+    };
+}
+
+function validatePresetName(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const name = value.trim();
+    if (!name || name.length > MAX_PRESET_NAME_LENGTH || /[\u0000-\u001f\u007f]/.test(name)) {
+        return null;
+    }
+    return name;
+}
+
 function isValidStoredSettings(settings) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)
         || typeof settings.calibrationEnabled !== 'boolean'
@@ -665,6 +970,13 @@ function isValidStoredSettings(settings) {
     }
 
     return [1, 2].every((screen) => validateStoredAlignment(settings.screens[screen]));
+}
+
+function isValidStoredPreset(preset) {
+    return preset && typeof preset === 'object' && !Array.isArray(preset)
+        && validatePresetName(preset.name) === preset.name
+        && preset.screens && typeof preset.screens === 'object' && !Array.isArray(preset.screens)
+        && [1, 2].every((screen) => validateStoredAlignment(preset.screens[screen]));
 }
 
 function validateStoredAlignment(settings) {
