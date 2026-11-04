@@ -30,6 +30,8 @@ function startDisplay() {
     let alignmentRevision = null;
     let displayedUpdateId = null;
     let socket = null;
+    let identifyOverlay = null;
+    let identifyTimer = null;
     const alignmentByScreen = {
         1: { horizontal: 0, vertical: 0, scale: 1 },
         2: { horizontal: 0, vertical: 0, scale: 1 }
@@ -182,6 +184,34 @@ function startDisplay() {
     socket.on('device:assigned', handleAssignment);
     socket.on('device:assignment-update', handleAssignment);
     socket.on('device:unassigned', handleUnassignment);
+    socket.on('device:identify', (request) => {
+        if (!assignedScreen || request?.screen !== assignedScreen) {
+            return;
+        }
+        const durationMs = Number.isInteger(request.durationMs)
+            ? Math.min(5000, Math.max(1000, request.durationMs))
+            : 2500;
+        if (!identifyOverlay) {
+            identifyOverlay = document.createElement('div');
+            identifyOverlay.className = 'identify-overlay';
+            identifyOverlay.setAttribute('role', 'status');
+            identifyOverlay.setAttribute('aria-live', 'assertive');
+            document.body.append(identifyOverlay);
+        }
+        identifyOverlay.textContent = `SCREEN ${assignedScreen}`;
+        identifyOverlay.hidden = false;
+        identifyOverlay.classList.remove('is-visible');
+        requestAnimationFrame(() => identifyOverlay?.classList.add('is-visible'));
+        clearTimeout(identifyTimer);
+        identifyTimer = setTimeout(() => {
+            identifyOverlay?.classList.remove('is-visible');
+            identifyTimer = setTimeout(() => {
+                if (identifyOverlay) {
+                    identifyOverlay.hidden = true;
+                }
+            }, 220);
+        }, durationMs);
+    });
 
     socket.on('screen-config:update', (configuration) => {
         const count = configuration?.totalScreens;
@@ -308,5 +338,8 @@ function startDisplay() {
         console.error('Socket.IO reconnection error:', error);
     });
 
-    window.addEventListener('pagehide', () => socket.disconnect(), { once: true });
+    window.addEventListener('pagehide', () => {
+        socket.disconnect();
+        clearTimeout(identifyTimer);
+    }, { once: true });
 }

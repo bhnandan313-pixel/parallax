@@ -1006,13 +1006,28 @@ export function createParallaxServer({
                 respond({ ok: false, message: 'Device is not registered' });
                 return;
             }
-            const conflictingDevice = Object.entries(persistedAssignments)
-                .find(([id, assignedScreen]) => id !== deviceId && screen !== null
-                    && assignedScreen === screen);
-            if (conflictingDevice) {
+            const conflictingDevice = screen === null
+                ? null
+                : [...devices.values()].find((entry) =>
+                    entry.id !== deviceId && entry.screen === screen);
+            const swapDeviceId = request?.swapDeviceId;
+            if (swapDeviceId !== undefined
+                && (typeof swapDeviceId !== 'string'
+                    || !swapDeviceId.trim()
+                    || swapDeviceId.length > 128
+                    || !conflictingDevice
+                    || conflictingDevice.id !== swapDeviceId
+                    || device.screen === null)) {
                 respond({
                     ok: false,
-                    message: `Screen ${screen} is already assigned to ${conflictingDevice[0]}.`
+                    message: 'A safe swap requires the selected device and screen owner to both have assignments.'
+                });
+                return;
+            }
+            if (conflictingDevice && swapDeviceId !== conflictingDevice.id) {
+                respond({
+                    ok: false,
+                    message: `Screen ${screen} is already assigned to ${conflictingDevice.id}.`
                 });
                 return;
             }
@@ -1022,11 +1037,21 @@ export function createParallaxServer({
                     if (screen !== null && screen > totalScreens) {
                         throw new Error('SCREEN_COUNT_CHANGED');
                     }
-                    const currentConflict = Object.entries(persistedAssignments)
-                        .find(([id, assignedScreen]) => id !== deviceId && screen !== null
-                            && assignedScreen === screen);
+                    const currentConflict = screen === null
+                        ? null
+                        : [...devices.values()].find((entry) =>
+                            entry.id !== deviceId && entry.screen === screen);
+                    if (currentConflict
+                        && (swapDeviceId !== currentConflict.id || device.screen === null)) {
+                        throw new Error(`SCREEN_ALREADY_ASSIGNED:${currentConflict.id}`);
+                    }
                     if (currentConflict) {
-                        throw new Error(`SCREEN_ALREADY_ASSIGNED:${currentConflict[0]}`);
+                        persistedAssignments[currentConflict.id] = device.screen;
+                        currentConflict.screen = device.screen;
+                        currentConflict.displayStatus = 'waiting';
+                        currentConflict.displayError = null;
+                        currentConflict.loadedUpdateId = null;
+                        currentConflict.reportedAlignmentRevision = null;
                     }
                     persistedAssignments[deviceId] = screen;
                     device.screen = screen;
@@ -1050,9 +1075,40 @@ export function createParallaxServer({
                 return;
             }
 
+            if (conflictingDevice) {
+                emitDeviceConfiguration(conflictingDevice);
+            }
             emitDeviceConfiguration(device);
             await broadcastScreenConfiguration();
-            respond({ ok: true, deviceId, screen });
+            respond({
+                ok: true,
+                deviceId,
+                screen,
+                ...(conflictingDevice ? { swappedDeviceId: conflictingDevice.id } : {})
+            });
+        });
+
+        socket.on('device:identify', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized device identify request' });
+                return;
+            }
+            const deviceId = request?.deviceId;
+            if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
+                respond({ ok: false, message: 'Invalid device ID' });
+                return;
+            }
+            const device = devices.get(deviceId);
+            if (!device || !device.socketId || device.screen === null) {
+                respond({ ok: false, message: 'Device is not connected and assigned to a screen' });
+                return;
+            }
+            io.sockets.sockets.get(device.socketId)?.emit('device:identify', {
+                screen: device.screen,
+                durationMs: 2500
+            });
+            respond({ ok: true, deviceId, screen: device.screen });
         });
 
         socket.on('device:report', (report) => {

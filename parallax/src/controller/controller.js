@@ -130,6 +130,41 @@ export function mountController() {
                     </section>
                 </aside>
             </section>
+
+            <section class="controller-card panorama-dashboard" aria-labelledby="dashboard-title">
+                <div class="card-heading">
+                    <div>
+                        <p class="eyebrow">LIVE DISPLAY WALL</p>
+                        <h2 id="dashboard-title">Visual panorama dashboard</h2>
+                    </div>
+                    <div class="dashboard-metrics">
+                        <span><strong data-dashboard-screen-count>2</strong> screens</span>
+                        <span><strong data-dashboard-device-count>0</strong> connected</span>
+                    </div>
+                </div>
+                <p class="card-description">Drag a connected device onto a screen to assign it. You can also use each screen's assignment menu.</p>
+                <div class="panorama-wall" data-panorama-wall aria-label="Panorama screen assignments"></div>
+                <div class="panorama-preview-wrap">
+                    <div class="panorama-preview-heading">
+                        <h3>Full panorama preview</h3>
+                        <span data-dashboard-content-status>Waiting for content</span>
+                    </div>
+                    <div class="panorama-preview" data-panorama-preview>
+                        <p class="dashboard-empty-state">Publish an image to preview the complete panorama.</p>
+                    </div>
+                </div>
+                <div class="dashboard-devices-wrap">
+                    <div class="panorama-preview-heading">
+                        <h3>Device information</h3>
+                        <span>Drag a device card to a screen</span>
+                    </div>
+                    <div class="dashboard-devices" data-dashboard-devices>
+                        <p class="dashboard-empty-state">No devices have registered yet.</p>
+                    </div>
+                </div>
+                <p class="dashboard-status" data-dashboard-status role="status" aria-live="polite"></p>
+            </section>
+
             <section class="controller-card calibration-card">
                 <div class="card-heading">
                     <div>
@@ -275,6 +310,10 @@ export function mountController() {
     const screenList = root.querySelector('[data-screen-list]');
     const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
     const assignmentStatus = root.querySelector('[data-assignment-status]');
+    const dashboardWall = root.querySelector('[data-panorama-wall]');
+    const dashboardPreview = root.querySelector('[data-panorama-preview]');
+    const dashboardDevices = root.querySelector('[data-dashboard-devices]');
+    const dashboardStatus = root.querySelector('[data-dashboard-status]');
     const diagnosticsScreens = root.querySelector('[data-diagnostics-screens]');
     const addDeviceButton = root.querySelector('[data-add-device]');
     const pairingDialog = root.querySelector('[data-pairing-dialog]');
@@ -298,6 +337,7 @@ export function mountController() {
     let totalScreens = 2;
     let assignmentMode = 'automatic';
     let registeredDevices = [];
+    let panoramaImageUrl = null;
     let pairingSession = null;
     let pairingCountdownTimer = null;
     let knownDeviceIds = null;
@@ -317,6 +357,151 @@ export function mountController() {
     let diagnostics = null;
     let lastServerCommunication = null;
     let alignmentReady = false;
+
+    function renderDashboardScreens() {
+        root.querySelector('[data-dashboard-screen-count]').textContent = String(totalScreens);
+        const connectedCount = registeredDevices.filter((device) => device.connected).length;
+        root.querySelector('[data-dashboard-device-count]').textContent = String(connectedCount);
+        dashboardWall.style.setProperty('--screen-count', String(totalScreens));
+        dashboardWall.innerHTML = Array.from({ length: totalScreens }, (_, index) => {
+            const screen = index + 1;
+            const device = registeredDevices.find((entry) => entry.screen === screen);
+            const connected = Boolean(device?.connected);
+            const status = !device ? 'Unassigned' : connected ? 'Online' : 'Offline';
+            const settings = alignmentByScreen[screen];
+            const displayStatus = diagnostics?.devices?.find((entry) => entry.screen === screen);
+            const assignmentOptions = [
+                `<option value="" ${device ? '' : 'selected'}>Unassigned</option>`,
+                ...registeredDevices.map((entry) => `
+                    <option value="${escapeHtml(entry.id)}" ${device?.id === entry.id ? 'selected' : ''}>
+                        ${escapeHtml(entry.id)}${entry.connected ? '' : ' · offline'}
+                    </option>
+                `)
+            ].join('');
+            return `
+                <article class="dashboard-screen-card ${connected ? 'is-online' : device ? 'is-offline' : 'is-unassigned'}"
+                    data-dashboard-screen="${screen}">
+                    <div class="dashboard-screen-heading">
+                        <span class="dashboard-screen-number">SCREEN ${screen}</span>
+                        <span class="dashboard-status-pill"><i></i>${status}</span>
+                    </div>
+                    <p class="dashboard-screen-device">${device ? escapeHtml(device.id) : 'No device assigned'}</p>
+                    <p class="dashboard-device-name">${device ? 'Name not reported' : 'Waiting for a device'}</p>
+                    <label class="dashboard-assignment-control">Assign device
+                        <select data-screen-assignment="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                            ${assignmentOptions}
+                        </select>
+                    </label>
+                    <div class="dashboard-alignment">
+                        <span>H <strong data-dashboard-alignment="${screen}-horizontal">${settings.horizontal.toFixed(1)} px</strong></span>
+                        <span>V <strong data-dashboard-alignment="${screen}-vertical">${settings.vertical.toFixed(1)} px</strong></span>
+                        <span>Scale <strong data-dashboard-alignment="${screen}-scale">${settings.scale.toFixed(3)}×</strong></span>
+                    </div>
+                    <p class="dashboard-screen-meta">Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'} ·
+                        ${device && connected
+                            ? `${displayStatus?.displayStatus ?? 'Waiting'} · ${formatTimestamp(displayStatus?.lastActivity)}`
+                            : device ? 'Last activity unavailable' : 'No activity yet'}
+                    </p>
+                    <p class="dashboard-screen-meta">Alignment delivery: ${
+                        displayStatus?.alignmentSynced === true
+                            ? 'Received latest settings'
+                            : displayStatus?.alignmentSynced === false
+                                ? 'Waiting for device confirmation'
+                                : 'Unknown'
+                    }</p>
+                    <p class="dashboard-screen-meta">Alignment updated: ${formatTimestamp(diagnostics?.alignmentUpdatedAt)}</p>
+                    <div class="dashboard-screen-actions">
+                        <button type="button" data-screen-identify="${screen}" ${!connected ? 'disabled' : ''}>
+                            Identify
+                        </button>
+                        <button type="button" data-screen-alignment="${screen}">View alignment</button>
+                        <button type="button" data-screen-reset="${screen}" ${!alignmentReady ? 'disabled' : ''}>
+                            Reset alignment
+                        </button>
+                    </div>
+                </article>
+            `;
+        }).join('');
+    }
+
+    function renderDashboardDevices() {
+        dashboardDevices.innerHTML = registeredDevices.length
+            ? registeredDevices.map((device) => {
+                const report = diagnostics?.devices?.find((entry) => entry.deviceId === device.id);
+                const status = device.connected ? 'Online' : 'Offline';
+                return `
+                    <article class="dashboard-device-card ${device.connected ? 'is-online' : 'is-offline'}"
+                        data-device-card="${escapeHtml(device.id)}" draggable="true">
+                        <div class="dashboard-device-card-heading">
+                            <strong>${escapeHtml(device.id)}</strong>
+                            <span class="dashboard-status-pill"><i></i>${status}</span>
+                        </div>
+                        <p>Name: Not reported</p>
+                        <p>Assigned screen: ${Number.isInteger(device.screen) ? `Screen ${device.screen}` : 'Unassigned'}</p>
+                        <p>Last activity: ${formatTimestamp(report?.lastActivity)}</p>
+                        <p>Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'}</p>
+                        <p>Alignment delivery: ${
+                            report?.alignmentSynced === true
+                                ? 'Received latest settings'
+                                : report?.alignmentSynced === false
+                                    ? 'Waiting for device confirmation'
+                                    : 'Unknown'
+                        }</p>
+                        <label class="dashboard-assignment-control">Screen assignment
+                            <select data-dashboard-device-assignment="${escapeHtml(device.id)}"
+                                ${!socket.connected ? 'disabled' : ''}>
+                                <option value="" ${device.screen === null ? 'selected' : ''}>Unassigned</option>
+                                ${Array.from({ length: totalScreens }, (_, index) => {
+                                    const screen = index + 1;
+                                    return `<option value="${screen}" ${device.screen === screen ? 'selected' : ''}>Screen ${screen}</option>`;
+                                }).join('')}
+                            </select>
+                        </label>
+                        <button type="button" class="dashboard-identify-button" data-device-identify="${escapeHtml(device.id)}"
+                            ${!device.connected || !Number.isInteger(device.screen) ? 'disabled' : ''}>
+                            Identify device
+                        </button>
+                    </article>
+                `;
+            }).join('')
+            : '<p class="dashboard-empty-state">No devices have registered yet.</p>';
+    }
+
+    function renderPanoramaPreview() {
+        const previewStatus = root.querySelector('[data-dashboard-content-status]');
+        if (!panoramaImageUrl) {
+            previewStatus.textContent = 'Waiting for content';
+            dashboardPreview.innerHTML =
+                '<p class="dashboard-empty-state">Publish an image to preview the complete panorama.</p>';
+            return;
+        }
+        previewStatus.textContent = 'Latest published image';
+        dashboardPreview.style.setProperty('--screen-count', String(totalScreens));
+        dashboardPreview.replaceChildren();
+        for (let index = 0; index < totalScreens; index += 1) {
+            const screen = index + 1;
+            const image = document.createElement('img');
+            image.src = panoramaImageUrl;
+            image.alt = '';
+            image.draggable = false;
+            image.style.width = `${totalScreens * 100}%`;
+            image.style.left = `-${(screen - 1) * 100}%`;
+            const segment = document.createElement('div');
+            segment.className = 'panorama-preview-segment';
+            segment.setAttribute('aria-label', `Screen ${screen} preview`);
+            segment.append(image);
+            const label = document.createElement('span');
+            label.className = 'panorama-preview-label';
+            label.textContent = `SCREEN ${screen}`;
+            segment.append(label);
+            dashboardPreview.append(segment);
+        }
+    }
+
+    function renderDashboard() {
+        renderDashboardScreens();
+        renderDashboardDevices();
+    }
 
     function renderScreenPanels() {
         const screens = Array.from({ length: totalScreens }, (_, index) => index + 1);
@@ -385,6 +570,17 @@ export function mountController() {
             input.step = getAlignmentStep(axis, fineAdjustmentInput.checked);
             output.textContent = formatAlignmentValue(axis, settings[axis], fineAdjustmentInput.checked);
             input.disabled = !alignmentReady;
+        }
+        const dashboardValues = {
+            horizontal: `${settings.horizontal.toFixed(1)} px`,
+            vertical: `${settings.vertical.toFixed(1)} px`,
+            scale: `${settings.scale.toFixed(3)}×`
+        };
+        for (const [axis, value] of Object.entries(dashboardValues)) {
+            const output = root.querySelector(`[data-dashboard-alignment="${screen}-${axis}"]`);
+            if (output) {
+                output.textContent = value;
+            }
         }
         panel.querySelector('[data-alignment-reset]').disabled = !alignmentReady;
         const diagnosticsPanel = root.querySelector(`[data-diagnostics-screen="${screen}"]`);
@@ -493,6 +689,7 @@ export function mountController() {
 
             alignmentStatus.classList.remove('is-error');
             alignmentStatus.textContent = `Screen ${screen} alignment updated.`;
+            renderDashboardScreens();
         });
     }
 
@@ -652,6 +849,7 @@ export function mountController() {
             calibrationButton.disabled = false;
             calibrationEnabled = response.enabled;
             updateCalibrationUI();
+            renderDashboardScreens();
             alignmentStatus.textContent = `Calibration grid ${calibrationEnabled ? 'enabled' : 'disabled'}.`;
         }, () => {
             calibrationButton.disabled = false;
@@ -708,6 +906,7 @@ export function mountController() {
             }
         }
         renderScreenPanels();
+        renderPanoramaPreview();
         screenConfigSaveButton.disabled = !socket.connected;
         assignmentModeSelect.disabled = !socket.connected;
         screenCountSelect.disabled = !socket.connected;
@@ -744,23 +943,108 @@ export function mountController() {
             return;
         }
         const screen = select.value === '' ? null : Number(select.value);
-        socket.timeout(5000).emit('device:assign-screen', {
-            deviceId: select.dataset.deviceAssignment,
-            screen
-        }, (error, response) => {
-            if (error || !response?.ok) {
-                assignmentStatus.textContent = error
-                    ? 'The server did not acknowledge the device assignment.'
-                    : response?.message || 'Unable to assign the device.';
-                assignmentStatus.classList.add('is-error');
-                setDevices(registeredDevices);
-                return;
+        requestDeviceAssignment(select.dataset.deviceAssignment, screen);
+    });
+
+    dashboardWall.addEventListener('change', (event) => {
+        const select = event.target.closest('[data-screen-assignment]');
+        if (!select) {
+            return;
+        }
+        const screen = Number(select.dataset.screenAssignment);
+        const selectedDeviceId = select.value;
+        const currentDevice = registeredDevices.find((device) => device.screen === screen);
+        if (!selectedDeviceId) {
+            if (currentDevice) {
+                requestDeviceAssignment(currentDevice.id, null);
+            } else {
+                renderDashboard();
             }
-            assignmentStatus.classList.remove('is-error');
-            assignmentStatus.textContent = screen === null
-                ? `Device ${response.deviceId} is now unassigned.`
-                : `Device ${response.deviceId} assigned to Screen ${screen}.`;
-        });
+            return;
+        }
+        requestDeviceAssignment(selectedDeviceId, screen);
+    });
+
+    dashboardWall.addEventListener('click', (event) => {
+        const identifyButton = event.target.closest('[data-screen-identify]');
+        if (identifyButton) {
+            const screen = Number(identifyButton.dataset.screenIdentify);
+            const device = registeredDevices.find((entry) => entry.screen === screen && entry.connected);
+            if (device) {
+                identifyDevice(device.id);
+            }
+            return;
+        }
+        const alignmentButton = event.target.closest('[data-screen-alignment]');
+        if (alignmentButton) {
+            const panel = root.querySelector(`[data-alignment-screen="${alignmentButton.dataset.screenAlignment}"]`);
+            panel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            panel?.querySelector('input')?.focus({ preventScroll: true });
+            return;
+        }
+        const resetButton = event.target.closest('[data-screen-reset]');
+        if (resetButton && alignmentReady) {
+            const screen = Number(resetButton.dataset.screenReset);
+            alignmentByScreen[screen] = { horizontal: 0, vertical: 0, scale: 1 };
+            renderAlignmentScreen(screen);
+            renderDashboardScreens();
+            sendAlignment(screen);
+        }
+    });
+
+    dashboardDevices.addEventListener('change', (event) => {
+        const select = event.target.closest('[data-dashboard-device-assignment]');
+        if (!select) {
+            return;
+        }
+        requestDeviceAssignment(
+            select.dataset.dashboardDeviceAssignment,
+            select.value === '' ? null : Number(select.value)
+        );
+    });
+    dashboardDevices.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-device-identify]');
+        if (button) {
+            identifyDevice(button.dataset.deviceIdentify);
+        }
+    });
+    dashboardDevices.addEventListener('dragstart', (event) => {
+        const card = event.target.closest('[data-device-card]');
+        if (!card || !event.dataTransfer) {
+            return;
+        }
+        event.dataTransfer.setData('text/plain', card.dataset.deviceCard);
+        event.dataTransfer.effectAllowed = 'move';
+        card.classList.add('is-dragging');
+    });
+    dashboardDevices.addEventListener('dragend', (event) => {
+        event.target.closest('[data-device-card]')?.classList.remove('is-dragging');
+        dashboardWall.querySelectorAll('.is-drop-target').forEach((card) =>
+            card.classList.remove('is-drop-target'));
+    });
+    dashboardWall.addEventListener('dragover', (event) => {
+        const card = event.target.closest('[data-dashboard-screen]');
+        if (card && socket.connected) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            card.classList.add('is-drop-target');
+        }
+    });
+    dashboardWall.addEventListener('dragleave', (event) => {
+        const card = event.target.closest('[data-dashboard-screen]');
+        if (card && !card.contains(event.relatedTarget)) {
+            card.classList.remove('is-drop-target');
+        }
+    });
+    dashboardWall.addEventListener('drop', (event) => {
+        const card = event.target.closest('[data-dashboard-screen]');
+        const deviceId = event.dataTransfer?.getData('text/plain');
+        if (!card || !deviceId) {
+            return;
+        }
+        event.preventDefault();
+        card.classList.remove('is-drop-target');
+        requestDeviceAssignment(deviceId, Number(card.dataset.dashboardScreen));
     });
 
     presetSelect.addEventListener('change', updatePresetControls);
@@ -779,6 +1063,7 @@ export function mountController() {
                 alignmentByScreen[screen] = { ...response.screens[screen] };
             }
             renderAlignmentUI();
+            renderDashboardScreens();
             alignmentStatus.textContent = `Preset "${response.name}" loaded.`;
         });
     });
@@ -803,6 +1088,7 @@ export function mountController() {
                 alignmentByScreen[screen] = { ...response.screens[screen] };
             }
             renderAlignmentUI();
+            renderDashboardScreens();
             alignmentStatus.textContent = `All ${totalScreens} screens reset to neutral alignment.`;
         });
     });
@@ -821,6 +1107,7 @@ export function mountController() {
 
     function setCurrentContent(imageUrl, filename, width, height) {
         const currentImage = root.querySelector('[data-current-image]');
+        panoramaImageUrl = imageUrl;
         currentImage.replaceChildren();
         const image = document.createElement('img');
         image.src = imageUrl;
@@ -830,6 +1117,7 @@ export function mountController() {
         root.querySelector('[data-current-meta]').textContent = width && height
             ? `${width} × ${height} · Published to displays`
             : 'Currently displayed';
+        renderPanoramaPreview();
     }
 
     function setDevices(devices) {
@@ -887,6 +1175,7 @@ export function mountController() {
                 </label>
             `).join('')
             : '<p class="network-note">No registered devices.</p>';
+        renderDashboard();
     }
 
     function escapeHtml(value) {
@@ -921,6 +1210,12 @@ export function mountController() {
         }
         diagnostics = snapshot;
         markServerCommunication();
+        const currentContent = snapshot.currentContent;
+        if (currentContent?.contentType === 'image'
+            && typeof currentContent.imageUrl === 'string'
+            && currentContent.imageUrl !== panoramaImageUrl) {
+            setCurrentContent(currentContent.imageUrl, 'Current panorama', 0, 0);
+        }
         root.querySelector('[data-diagnostics-backend]').textContent =
             snapshot.backendConnected === true ? 'Connected' : 'Unknown';
         root.querySelector('[data-diagnostics-count]').textContent =
@@ -989,6 +1284,84 @@ export function mountController() {
                                 ? 'Showing previous content'
                                 : 'Waiting for image result';
         }
+        renderDashboardScreens();
+        renderDashboardDevices();
+    }
+
+    function setDashboardStatus(message, isError = false) {
+        dashboardStatus.textContent = message;
+        dashboardStatus.classList.toggle('is-error', isError);
+    }
+
+    function requestDeviceAssignment(deviceId, screen) {
+        const device = registeredDevices.find((entry) => entry.id === deviceId);
+        if (!device) {
+            setDashboardStatus('This device is no longer registered. Refresh the dashboard and try again.', true);
+            return;
+        }
+        if (screen === device.screen) {
+            renderDashboard();
+            return;
+        }
+        const occupant = Number.isInteger(screen)
+            ? registeredDevices.find((entry) => entry.screen === screen && entry.id !== deviceId)
+            : null;
+        let swapDeviceId;
+        if (occupant) {
+            if (!Number.isInteger(device.screen)) {
+                setDashboardStatus(
+                    `${occupant.id} already owns Screen ${screen}. Assign the unassigned device to an empty screen first.`,
+                    true
+                );
+                renderDashboard();
+                return;
+            }
+            if (!window.confirm(
+                `Screen ${screen} is assigned to ${occupant.id}. Swap ${device.id} and ${occupant.id} between screens?`
+            )) {
+                renderDashboard();
+                return;
+            }
+            swapDeviceId = occupant.id;
+        }
+
+        const request = { deviceId, screen };
+        if (swapDeviceId) {
+            request.swapDeviceId = swapDeviceId;
+        }
+        setDashboardStatus(`Updating ${deviceId} assignment...`);
+        socket.timeout(5000).emit('device:assign-screen', request, (error, response) => {
+            if (error || !response?.ok) {
+                const message = error
+                    ? 'The server did not acknowledge the device assignment.'
+                    : response?.message || 'Unable to assign the device.';
+                setDashboardStatus(message, true);
+                assignmentStatus.textContent = message;
+                assignmentStatus.classList.add('is-error');
+                renderDashboard();
+                return;
+            }
+            const message = response.swappedDeviceId
+                ? `Swapped ${response.deviceId} and ${response.swappedDeviceId}.`
+                : screen === null
+                    ? `Device ${response.deviceId} is now unassigned.`
+                    : `Device ${response.deviceId} assigned to Screen ${screen}.`;
+            setDashboardStatus(message);
+            assignmentStatus.textContent = message;
+            assignmentStatus.classList.remove('is-error');
+        });
+    }
+
+    function identifyDevice(deviceId) {
+        socket.timeout(5000).emit('device:identify', { deviceId }, (error, response) => {
+            if (error || !response?.ok) {
+                setDashboardStatus(error
+                    ? 'The server did not acknowledge the identify request.'
+                    : response?.message || 'Unable to identify this device.', true);
+                return;
+            }
+            setDashboardStatus(`Identify signal sent to ${response.deviceId} on Screen ${response.screen}.`);
+        });
     }
 
     function showPreview(file) {
@@ -1184,6 +1557,7 @@ export function mountController() {
 
         calibrationEnabled = state.enabled;
         updateCalibrationUI();
+        renderDashboardScreens();
         if (diagnostics) {
             setDiagnostics({ ...diagnostics, calibrationEnabled });
         }
@@ -1217,6 +1591,7 @@ export function mountController() {
 
         alignmentReady = true;
         renderAlignmentUI();
+        renderDashboardScreens();
         updatePresetControls();
         alignmentStatus.textContent = 'Alignment settings synchronized.';
         alignmentStatus.classList.remove('is-error');

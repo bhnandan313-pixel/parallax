@@ -959,6 +959,133 @@ test('publishes live device diagnostics and confirms alignment receipt per phone
     }
 });
 
+test('streams a four-screen dashboard snapshot and safely assigns and identifies devices', async () => {
+    const server = await startServer({ reservationMs: 100 });
+    const clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        const screenCountUpdate = nextEvent(controller, 'screen-config:update');
+        const configuration = await emitAck(controller, 'screen-config:set', {
+            totalScreens: 4,
+            assignmentMode: 'automatic'
+        });
+        assert.equal(configuration.ok, true);
+        assert.equal(configuration.totalScreens, 4);
+        assert.equal((await screenCountUpdate).totalScreens, 4);
+
+        const phones = [];
+        for (let screen = 1; screen <= 4; screen += 1) {
+            const phone = await registerDevice(server.url, `dashboard-phone-${screen}`);
+            phones.push(phone);
+            clients.push(phone.socket);
+            assert.equal(phone.assignment.screen, screen);
+        }
+        const dashboardSnapshot = await new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), 300);
+            const onSnapshot = (devices) => {
+                if (devices.length !== 4) {
+                    return;
+                }
+                clearTimeout(timer);
+                controller.off('devices:update', onSnapshot);
+                resolve(devices);
+            };
+            controller.on('devices:update', onSnapshot);
+            controller.emit('controller:register');
+        });
+        assert.deepEqual(dashboardSnapshot.map(({ id, screen, connected }) =>
+            ({ id, screen, connected })), [
+            { id: 'dashboard-phone-1', screen: 1, connected: true },
+            { id: 'dashboard-phone-2', screen: 2, connected: true },
+            { id: 'dashboard-phone-3', screen: 3, connected: true },
+            { id: 'dashboard-phone-4', screen: 4, connected: true }
+        ]);
+
+        const duplicate = await emitAck(controller, 'device:assign-screen', {
+            deviceId: 'dashboard-phone-1',
+            screen: 2
+        });
+        assert.equal(duplicate.ok, false);
+        assert.match(duplicate.message, /already assigned/);
+
+        const firstUpdate = nextEvent(phones[0].socket, 'device:assignment-update');
+        const secondUpdate = nextEvent(phones[1].socket, 'device:assignment-update');
+        const swapped = await emitAck(controller, 'device:assign-screen', {
+            deviceId: 'dashboard-phone-1',
+            screen: 2,
+            swapDeviceId: 'dashboard-phone-2'
+        });
+        assert.deepEqual(swapped, {
+            ok: true,
+            deviceId: 'dashboard-phone-1',
+            screen: 2,
+            swappedDeviceId: 'dashboard-phone-2'
+        });
+        assert.equal((await firstUpdate).screen, 2);
+        assert.equal((await secondUpdate).screen, 1);
+
+        const identifyTargets = phones.map(() => 0);
+        phones.forEach((phone, index) => {
+            phone.socket.on('device:identify', () => {
+                identifyTargets[index] += 1;
+            });
+        });
+        const identified = nextEvent(phones[2].socket, 'device:identify');
+        assert.deepEqual(await emitAck(controller, 'device:identify', {
+            deviceId: 'dashboard-phone-3'
+        }), {
+            ok: true,
+            deviceId: 'dashboard-phone-3',
+            screen: 3
+        });
+        assert.deepEqual(await identified, { screen: 3, durationMs: 2500 });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.deepEqual(identifyTargets, [0, 0, 1, 0]);
+
+        const observer = await connectClient(server.url);
+        clients.push(observer);
+        const currentAlignment = nextEvent(observer, 'alignment:current');
+        observer.emit('controller:register');
+        await currentAlignment;
+        const alignmentUpdate = nextEvent(observer, 'alignment:current');
+        const screenTwoSettings = { horizontal: 8, vertical: -4, scale: 1.02 };
+        assert.equal((await emitAck(controller, 'alignment:set', {
+            screen: 2,
+            settings: screenTwoSettings
+        })).ok, true);
+        assert.deepEqual((await alignmentUpdate).screens[2], screenTwoSettings);
+
+        const controllerSnapshot = nextEvent(controller, 'devices:update');
+        const diagnosticSnapshot = nextEvent(controller, 'diagnostics:update');
+        phones[3].socket.disconnect();
+        const disconnectedDevices = await controllerSnapshot;
+        const offline = disconnectedDevices.find(({ id }) => id === 'dashboard-phone-4');
+        assert.equal(offline.connected, false);
+        const disconnectedDiagnostics = await diagnosticSnapshot;
+        assert.equal(
+            disconnectedDiagnostics.devices.find(({ screen }) => screen === 4).status,
+            'disconnected'
+        );
+
+        const unauthorized = await connectClient(server.url);
+        clients.push(unauthorized);
+        assert.deepEqual(await emitAck(unauthorized, 'device:identify', {
+            deviceId: 'dashboard-phone-3'
+        }), {
+            ok: false,
+            message: 'Unauthorized device identify request'
+        });
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
 function connectClient(url) {
     return new Promise((resolve, reject) => {
         const socket = createSocket(url, {

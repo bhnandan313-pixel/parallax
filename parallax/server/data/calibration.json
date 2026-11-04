@@ -3,10 +3,10 @@
   "totalScreens": 2,
   "assignmentMode": "manual",
   "assignments": {
-    "60f643f1-3382-40bb-8bda-52ba5f0bbc07": 1,
-    "3f2e0ddb-c883-4527-96d3-20d3a88c59f1": 2,
+    "60f643f1-3382-40bb-8bda-52ba5f0bbc07": null,
+    "3f2e0ddb-c883-4527-96d3-20d3a88c59f1": 1,
     "2277ee97-fd39-42ef-997b-04c70e72dc9e": null,
-    "77f7649d-63db-4a40-9968-8c0444d010c2": null
+    "77f7649d-63db-4a40-9968-8c0444d010c2": 2
   },
   "screens": {
     "1": {
