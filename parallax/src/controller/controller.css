@@ -1325,6 +1325,26 @@ body.controller-page #app {
     white-space: nowrap;
 }
 
+.playback-volume {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px 12px;
+    margin-top: 12px;
+    color: #aaa6b4;
+    font-size: 10px;
+}
+
+.playback-volume input {
+    width: 100%;
+    accent-color: #a855f7;
+}
+
+.playback-volume output {
+    min-width: 34px;
+    text-align: right;
+}
+
 .schedule-list {
     display: grid;
     gap: 8px;

@@ -1812,6 +1812,15 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         assert.equal((await secondContent).videoUrl, firstVideo.url);
         assert.equal(published.content.transition, 'fade');
 
+        const volumeSync = nextEvent(first.socket, 'playback:sync');
+        const volumeUpdate = await emitAck(controller, 'playback:volume', { volume: 0.35 });
+        assert.equal(volumeUpdate.ok, true);
+        assert.equal(volumeUpdate.playback.volume, 0.35);
+        assert.equal((await volumeSync).volume, 0.35);
+        assert.equal(JSON.parse(await readFile(server.mediaManifestFile, 'utf8'))
+            .playback.volume, 0.35);
+        assert.equal((await emitAck(controller, 'playback:volume', { volume: 1.1 })).ok, false);
+
         const firstPlayTimeline = nextEvent(first.socket, 'playback:sync');
         const secondPlayTimeline = nextEvent(second.socket, 'playback:sync');
         const playing = await emitAck(controller, 'playback:play', {});
@@ -1822,6 +1831,8 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         ]);
         assert.equal(firstTimeline.timelineId, secondTimeline.timelineId);
         assert.equal(firstTimeline.startedAt, secondTimeline.startedAt);
+        assert.equal(firstTimeline.volume, 0.35);
+        assert.equal(secondTimeline.volume, 0.35);
         assert.ok(firstTimeline.startedAt >= firstTimeline.serverNow);
 
         const paused = await emitAck(controller, 'playback:pause', {});

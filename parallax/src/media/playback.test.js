@@ -19,8 +19,16 @@ test('playback timeline derives one authoritative position for all devices', () 
     };
     const timeline = createPlaybackTimeline(playback, 12_500);
     assert.equal(timeline.positionSeconds, 4);
+    assert.equal(timeline.volume, 0);
     assert.equal(expectedPlaybackPosition(timeline, 13_000), 7);
     assert.equal(getPlaybackPosition({ ...playback, status: 'paused' }, 99_000), 4);
+});
+
+test('playback timeline clamps volume and defaults legacy states to muted', () => {
+    assert.equal(createPlaybackTimeline({ status: 'stopped', volume: 0.6 }).volume, 0.6);
+    assert.equal(createPlaybackTimeline({ status: 'stopped', volume: 2 }).volume, 1);
+    assert.equal(createPlaybackTimeline({ status: 'stopped', volume: -1 }).volume, 0);
+    assert.equal(createPlaybackTimeline({ status: 'stopped' }).volume, 0);
 });
 
 test('playback drift correction ignores buffering-scale drift and corrects significant drift', () => {

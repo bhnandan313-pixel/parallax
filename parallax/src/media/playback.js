@@ -2,6 +2,7 @@ export const PLAYBACK_STATES = Object.freeze(['playing', 'paused', 'stopped']);
 export const TRANSITIONS = Object.freeze(['none', 'fade', 'slide-left', 'slide-right']);
 export const PLAYBACK_START_DELAY_MS = 1500;
 export const PLAYBACK_DRIFT_THRESHOLD_SECONDS = 0.3;
+export const DEFAULT_PLAYBACK_VOLUME = 0;
 
 export function getPlaybackPosition(playback, now = Date.now()) {
     if (!playback || playback.status !== 'playing' || !Number.isFinite(playback.startedAt)) {
@@ -22,7 +23,10 @@ export function createPlaybackTimeline(playback, serverNow = Date.now()) {
         playlistId: playback.playlistId ?? null,
         playlistIndex: playback.playlistIndex ?? 0,
         nextPlaylistIndex: playback.nextPlaylistIndex ?? null,
-        transition: TRANSITIONS.includes(playback.transition) ? playback.transition : 'none'
+        transition: TRANSITIONS.includes(playback.transition) ? playback.transition : 'none',
+        volume: Number.isFinite(playback.volume)
+            ? Math.min(1, Math.max(0, playback.volume))
+            : DEFAULT_PLAYBACK_VOLUME
     };
 }
 

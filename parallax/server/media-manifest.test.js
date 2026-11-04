@@ -69,6 +69,7 @@ test('migrates existing media manifests to retain upload history', async () => {
     const filePath = join(directory, 'media.json');
     const manifest = createDefaultMediaManifest();
     delete manifest.uploadHistory;
+    delete manifest.playback.volume;
     manifest.media.push({
         id: 'media-1',
         filename: 'existing.mp4',
@@ -82,6 +83,7 @@ test('migrates existing media manifests to retain upload history', async () => {
     try {
         await writeFile(filePath, JSON.stringify(manifest), 'utf8');
         const migrated = await loadMediaManifest(filePath);
+        assert.equal(migrated.playback.volume, 0);
         assert.deepEqual(migrated.uploadHistory, [{
             id: 'media-1',
             filename: 'existing.mp4',

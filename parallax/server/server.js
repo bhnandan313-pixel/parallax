@@ -499,8 +499,10 @@ export function createParallaxServer({
                 status: 'playing',
                 mediaId: item.id,
                 positionSeconds: 0,
+                volume: playbackState.volume ?? 0,
                 startedAt: now + PLAYBACK_START_DELAY_MS,
                 timelineId: randomUUID(),
+                volume: playbackState.volume ?? 0,
                 playlistId,
                 playlistIndex,
                 nextPlaylistIndex: playlist
@@ -508,7 +510,7 @@ export function createParallaxServer({
                     : null,
                 transition: transitionType
             }
-            : createStoppedPlayback(item.id, transitionType);
+            : createStoppedPlayback(item.id, transitionType, playbackState.volume ?? 0);
         nextPlayback.playlistId = playlistId;
         nextPlayback.playlistIndex = playlistIndex;
         await updateMediaManifest((manifest) => {
@@ -795,7 +797,11 @@ export function createParallaxServer({
                 } else if (activeScheduleId) {
                     await updateMediaManifest((manifest) => {
                         manifest.activeScheduleId = null;
-                        manifest.playback = createStoppedPlayback(playbackState.mediaId);
+                        manifest.playback = createStoppedPlayback(
+                            playbackState.mediaId,
+                            'none',
+                            playbackState.volume ?? 0
+                        );
                     });
                     broadcastPlayback();
                 }
@@ -1321,7 +1327,7 @@ export function createParallaxServer({
                     uploadStatus: 'uploaded'
                 });
                 manifest.currentContent = persistedContent;
-                manifest.playback = createStoppedPlayback(mediaId);
+                manifest.playback = createStoppedPlayback(mediaId, 'none', playbackState.volume ?? 0);
             });
             currentContent = persistedContent;
             playbackState = { ...mediaManifest.playback };
@@ -1705,7 +1711,11 @@ export function createParallaxServer({
             try {
                 await updateMediaManifest((manifest) => {
                     manifest.currentContent = nextContent;
-                    manifest.playback = createStoppedPlayback();
+                    manifest.playback = createStoppedPlayback(
+                        null,
+                        'none',
+                        playbackState.volume ?? 0
+                    );
                 });
             } catch (error) {
                 console.error('Unable to persist content update:', error);
@@ -1819,7 +1829,11 @@ export function createParallaxServer({
                             imageUrl: '/panorama.jpg',
                             updateId: randomUUID()
                         };
-                        manifest.playback = createStoppedPlayback();
+                        manifest.playback = createStoppedPlayback(
+                            null,
+                            'none',
+                            playbackState.volume ?? 0
+                        );
                     }
                 });
             } catch (error) {
@@ -1864,6 +1878,31 @@ export function createParallaxServer({
             setPlaybackState(socket, request, acknowledge, 'stop'));
         socket.on('playback:seek', (request, acknowledge) =>
             setPlaybackState(socket, request, acknowledge, 'seek'));
+        socket.on('playback:volume', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized playback request' });
+                return;
+            }
+            if (!Number.isFinite(request?.volume)
+                || request.volume < 0
+                || request.volume > 1) {
+                respond({ ok: false, message: 'Playback volume must be between 0 and 1' });
+                return;
+            }
+            try {
+                await updateMediaManifest((manifest) => {
+                    manifest.playback.volume = request.volume;
+                });
+            } catch (error) {
+                console.error('Unable to persist playback volume:', error);
+                respond({ ok: false, message: 'Unable to save playback volume' });
+                return;
+            }
+            const timeline = broadcastPlayback();
+            broadcastMediaSnapshot();
+            respond({ ok: true, playback: timeline });
+        });
         socket.on('playback:next', (request, acknowledge) =>
             navigatePlaylist(socket, request, acknowledge, 1));
         socket.on('playback:previous', (request, acknowledge) =>
@@ -2039,7 +2078,11 @@ export function createParallaxServer({
                     manifest.schedules = manifest.schedules.filter((entry) => entry.id !== request.id);
                     if (manifest.activeScheduleId === request.id) {
                         manifest.activeScheduleId = null;
-                        manifest.playback = createStoppedPlayback(playbackState.mediaId);
+                        manifest.playback = createStoppedPlayback(
+                            playbackState.mediaId,
+                            'none',
+                            playbackState.volume ?? 0
+                        );
                     }
                 });
             } catch (error) {
@@ -2892,11 +2935,12 @@ function createDefaultSettings() {
     };
 }
 
-function createStoppedPlayback(mediaId = null, transition = 'none') {
+function createStoppedPlayback(mediaId = null, transition = 'none', volume = 0) {
     return {
         status: 'stopped',
         mediaId,
         positionSeconds: 0,
+        volume,
         startedAt: null,
         timelineId: randomUUID(),
         playlistId: null,

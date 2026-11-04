@@ -216,6 +216,11 @@ export function mountController() {
                         <input type="range" min="0" max="0" step="0.1" value="0" data-playback-seek disabled>
                         <span data-playback-position>0:00</span>
                     </label>
+                    <label class="playback-volume">Volume
+                        <input type="range" min="0" max="100" step="1" value="0"
+                            data-playback-volume aria-label="Display video volume" disabled>
+                        <output data-playback-volume-value>0%</output>
+                    </label>
                 </div>
                 <div class="schedule-controls">
                     <h3>Scheduled playback</h3>
@@ -461,6 +466,8 @@ export function mountController() {
     const playbackStatus = root.querySelector('[data-playback-status]');
     const playbackSeek = root.querySelector('[data-playback-seek]');
     const playbackPosition = root.querySelector('[data-playback-position]');
+    const playbackVolume = root.querySelector('[data-playback-volume]');
+    const playbackVolumeValue = root.querySelector('[data-playback-volume-value]');
     const scheduleTarget = root.querySelector('[data-schedule-target]');
     const scheduleStart = root.querySelector('[data-schedule-start]');
     const scheduleEnd = root.querySelector('[data-schedule-end]');
@@ -541,6 +548,7 @@ export function mountController() {
     let currentPlayback = null;
     let previewServerTimeOffset = 0;
     let previewSyncTimer = null;
+    let playbackVolumeTimer = null;
     let lastPreviewPlaybackError = null;
     let playlistDraft = [];
     let pairingSession = null;
@@ -1955,6 +1963,15 @@ export function mountController() {
             ? timeline.serverNow - Date.now()
             : 0;
         playbackStatus.textContent = timeline.status;
+        const volumePercent = Math.round((Number.isFinite(timeline.volume)
+            ? Math.min(1, Math.max(0, timeline.volume))
+            : 0) * 100);
+        if (document.activeElement !== playbackVolume) {
+            playbackVolume.value = String(volumePercent);
+            playbackVolumeValue.value = `${volumePercent}%`;
+            playbackVolumeValue.textContent = `${volumePercent}%`;
+        }
+        playbackVolume.disabled = !socket.connected;
         const item = mediaLibrary.find((entry) => entry.id === timeline.mediaId);
         const playlist = mediaPlaylists.find((entry) => entry.id === timeline.playlistId);
         const playlistItem = playlist?.items[timeline.playlistIndex];
@@ -2741,6 +2758,24 @@ export function mountController() {
             positionSeconds: Number(playbackSeek.value)
         }, (response) => setPlaybackSnapshot(response.playback));
     });
+    playbackVolume.addEventListener('input', () => {
+        playbackVolumeValue.value = `${playbackVolume.value}%`;
+        playbackVolumeValue.textContent = `${playbackVolume.value}%`;
+        clearTimeout(playbackVolumeTimer);
+        playbackVolumeTimer = setTimeout(() => {
+            playbackVolumeTimer = null;
+            sendMediaCommand('playback:volume', {
+                volume: Number(playbackVolume.value) / 100
+            }, (response) => setPlaybackSnapshot(response.playback));
+        }, 120);
+    });
+    playbackVolume.addEventListener('change', () => {
+        clearTimeout(playbackVolumeTimer);
+        playbackVolumeTimer = null;
+        sendMediaCommand('playback:volume', {
+            volume: Number(playbackVolume.value) / 100
+        }, (response) => setPlaybackSnapshot(response.playback));
+    });
 
     scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     root.querySelector('[data-schedule-create]').addEventListener('click', () => {
@@ -2786,6 +2821,7 @@ export function mountController() {
         assignmentModeSelect.disabled = false;
         screenCountSelect.disabled = false;
         addDeviceButton.disabled = false;
+        playbackVolume.disabled = false;
         scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
         setDevices(registeredDevices);
         socket.emit('controller:register', (result) => {
@@ -2807,6 +2843,7 @@ export function mountController() {
         assignmentModeSelect.disabled = true;
         screenCountSelect.disabled = true;
         addDeviceButton.disabled = true;
+        playbackVolume.disabled = true;
         publishButton.disabled = true;
         playlistSaveButton.disabled = true;
         playlistLoadButton.disabled = true;
@@ -2918,6 +2955,7 @@ export function mountController() {
 
     window.addEventListener('beforeunload', () => {
         socket.disconnect();
+        clearTimeout(playbackVolumeTimer);
         if (previewSyncTimer !== null) {
             clearInterval(previewSyncTimer);
             previewSyncTimer = null;

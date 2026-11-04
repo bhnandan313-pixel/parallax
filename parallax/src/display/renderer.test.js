@@ -56,14 +56,33 @@ class FakeVideo extends FakeImage {
 }
 
 class FakeCanvas {
-    width = 0;
-    height = 0;
+    _width = 0;
+    _height = 0;
+    dimensionWrites = 0;
     hidden = false;
     parentNode = null;
     id = '';
     attributes = {};
     calls = [];
     animations = [];
+
+    get width() {
+        return this._width;
+    }
+
+    set width(value) {
+        this._width = value;
+        this.dimensionWrites += 1;
+    }
+
+    get height() {
+        return this._height;
+    }
+
+    set height(value) {
+        this._height = value;
+        this.dimensionWrites += 1;
+    }
 
     setAttribute(name, value) {
         this.attributes[name] = value;
@@ -306,9 +325,11 @@ test('alignment redraws the canvas and disabled screens restore without losing a
     const { canvas, images, render, statuses } = setupRenderer(1);
     render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'first' });
     images[0].load();
+    const initialDimensionWrites = canvas.dimensionWrites;
     const firstDraws = drawCalls(canvas).length;
     assert.equal(render.setAlignment({ horizontal: 18, vertical: -12, scale: 1.04 }), true);
     assert.equal(drawCalls(canvas).length, firstDraws + 1);
+    assert.equal(canvas.dimensionWrites, initialDimensionWrites);
     assert.ok(canvas.calls.some(([name, x, y]) =>
         name === 'translate' && x === 318 && y === 288));
     assert.equal(render.setAlignment({ horizontal: 51, vertical: 0, scale: 1 }), false);
@@ -364,9 +385,13 @@ test('renders a video panorama crop and synchronizes its scheduled playback time
         positionSeconds: 3,
         startedAt: 1000,
         serverNow: 1000,
-        timelineId: 'timeline-1'
+        timelineId: 'timeline-1',
+        volume: 0.4
     }), true);
     assert.equal(videos[0].currentTime, 3);
+    assert.equal(videos[0].volume, 0.4);
+    assert.equal(videos[0].volume, 0.4);
+    assert.equal(videos[0].muted, false);
     assert.equal(videos[0].playCalls, 1);
 
     clock = 1400;
@@ -376,9 +401,12 @@ test('renders a video panorama crop and synchronizes its scheduled playback time
         positionSeconds: 3,
         startedAt: 1000,
         serverNow: 1400,
-        timelineId: 'timeline-1'
+        timelineId: 'timeline-1',
+        volume: 0.25
     });
     assert.equal(videos[0].currentTime, 3.4);
+    assert.equal(videos[0].volume, 0.25);
+    assert.equal(videos[0].muted, false);
     assert.deepEqual(render.getPlaybackReport(), {
         mediaId: 'video-1',
         positionSeconds: 3.4
@@ -386,4 +414,54 @@ test('renders a video panorama crop and synchronizes its scheduled playback time
 
     render({ ...content, updateId: 'video-update-2' });
     assert.equal(videos.length, 1);
+});
+
+test('draws video frames on video-frame callbacks and cancels them when playback pauses', () => {
+    const pendingFrames = new Map();
+    const cancelledFrames = [];
+    let nextFrameId = 0;
+    const { canvas, videos, render } = setupRenderer(1);
+    const content = {
+        contentType: 'video',
+        videoUrl: '/uploads/panorama.mp4',
+        mediaId: 'video-1',
+        updateId: 'video-update-1'
+    };
+    render(content);
+    videos[0].requestVideoFrameCallback = (callback) => {
+        const id = ++nextFrameId;
+        pendingFrames.set(id, callback);
+        return id;
+    };
+    videos[0].cancelVideoFrameCallback = (id) => {
+        cancelledFrames.push(id);
+        pendingFrames.delete(id);
+    };
+    videos[0].load();
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'video-1',
+        positionSeconds: 0,
+        startedAt: 1000,
+        serverNow: 1000,
+        timelineId: 'timeline-1'
+    });
+
+    const beforeFrameDraws = drawCalls(canvas).length;
+    const firstFrame = pendingFrames.get(1);
+    pendingFrames.delete(1);
+    firstFrame();
+    assert.equal(drawCalls(canvas).length, beforeFrameDraws + 1);
+    assert.equal(pendingFrames.has(2), true);
+
+    render.setPlayback({
+        status: 'paused',
+        mediaId: 'video-1',
+        positionSeconds: 0,
+        startedAt: null,
+        serverNow: 1000,
+        timelineId: 'timeline-2'
+    });
+    assert.deepEqual(cancelledFrames, [2]);
+    assert.equal(pendingFrames.size, 0);
 });

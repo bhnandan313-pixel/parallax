@@ -47,6 +47,7 @@ export function createContentRenderer({
     let playbackTimeline = null;
     let serverTimeOffset = 0;
     let frameHandle = null;
+    let cancelPendingFrame = null;
     let playbackStartTimer = null;
     let transitionTimer = null;
     let transitionUpdateId = null;
@@ -182,8 +183,12 @@ export function createContentRenderer({
             return;
         }
         const dimensions = getCanvasDimensions();
-        canvas.width = dimensions.width;
-        canvas.height = dimensions.height;
+        if (canvas.width !== dimensions.width) {
+            canvas.width = dimensions.width;
+        }
+        if (canvas.height !== dimensions.height) {
+            canvas.height = dimensions.height;
+        }
         const context = canvas.getContext('2d');
         if (!context) {
             onStatus('Connection error: Canvas rendering is unavailable', 'error');
@@ -257,12 +262,23 @@ export function createContentRenderer({
 
     function stopVideoFrames() {
         if (frameHandle !== null) {
-            cancelFrame(frameHandle);
+            cancelPendingFrame?.(frameHandle);
             frameHandle = null;
+            cancelPendingFrame = null;
         }
         if (playbackStartTimer !== null) {
             cancelTimeout(playbackStartTimer);
             playbackStartTimer = null;
+        }
+    }
+
+    function scheduleVideoFrame(video, callback) {
+        if (typeof video.requestVideoFrameCallback === 'function') {
+            frameHandle = video.requestVideoFrameCallback(callback);
+            cancelPendingFrame = (handle) => video.cancelVideoFrameCallback?.(handle);
+        } else {
+            frameHandle = requestFrame(callback);
+            cancelPendingFrame = cancelFrame;
         }
     }
 
@@ -341,7 +357,14 @@ export function createContentRenderer({
     function synchronizeVideo() {
         const video = loadedVideo;
         const timeline = playbackTimeline;
-        if (!video || !timeline || !screenEnabled || video.readyState < 2) {
+        if (!video || !timeline || !screenEnabled) {
+            return;
+        }
+        video.volume = Number.isFinite(timeline.volume)
+            ? Math.min(1, Math.max(0, timeline.volume))
+            : 0;
+        video.muted = video.volume === 0;
+        if (video.readyState < 2) {
             return;
         }
         if (timeline.status !== 'playing') {
@@ -380,19 +403,22 @@ export function createContentRenderer({
         if (frameHandle === null) {
             const drawFrame = () => {
                 frameHandle = null;
-                if (!loadedVideo || !screenEnabled || playbackTimeline?.status !== 'playing') {
+                cancelPendingFrame = null;
+                if (loadedVideo !== video
+                    || !screenEnabled
+                    || playbackTimeline?.status !== 'playing') {
                     return;
                 }
                 const clock = now() + serverTimeOffset;
                 const expected = expectedPlaybackPosition(playbackTimeline, clock);
-                if (Math.abs(loadedVideo.currentTime - expected)
+                if (Math.abs(video.currentTime - expected)
                     > PLAYBACK_DRIFT_THRESHOLD_SECONDS) {
-                    loadedVideo.currentTime = expected;
+                    video.currentTime = expected;
                 }
-                paint(loadedVideo);
-                frameHandle = requestFrame(drawFrame);
+                paint(video);
+                scheduleVideoFrame(video, drawFrame);
             };
-            frameHandle = requestFrame(drawFrame);
+            scheduleVideoFrame(video, drawFrame);
         }
         paint(video);
     }
@@ -474,7 +500,8 @@ export function createContentRenderer({
         const warmed = takePreloadedSource(content.contentType, mediaUrl);
         const video = warmed?.source ?? createVideo();
         video.preload = 'auto';
-        video.muted = true;
+        video.muted = playbackTimeline?.volume === undefined
+            || playbackTimeline.volume === 0;
         video.playsInline = true;
         video.crossOrigin = 'anonymous';
         video.onloadeddata = () => activateSource(video);

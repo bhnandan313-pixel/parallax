@@ -19,6 +19,7 @@ export function createDefaultMediaManifest() {
             status: 'stopped',
             mediaId: null,
             positionSeconds: 0,
+            volume: 0,
             startedAt: null,
             timelineId: null,
             playlistId: null,
@@ -115,6 +116,9 @@ export async function loadMediaManifest(filePath) {
             uploadStatus: 'uploaded'
         }));
     }
+    if (manifest.playback.volume === undefined) {
+        manifest.playback.volume = 0;
+    }
     if (!manifest.uploadHistory.every(validateUploadHistoryEntry)) {
         throw new Error('Media manifest has an unsupported or invalid upload history');
     }
@@ -168,6 +172,10 @@ function isValidMediaManifest(manifest) {
         && ['playing', 'paused', 'stopped'].includes(manifest.playback.status)
         && Number.isFinite(manifest.playback.positionSeconds)
         && manifest.playback.positionSeconds >= 0
+        && (manifest.playback.volume === undefined
+            || (Number.isFinite(manifest.playback.volume)
+                && manifest.playback.volume >= 0
+                && manifest.playback.volume <= 1))
         && (manifest.playback.startedAt === null
             || Number.isFinite(manifest.playback.startedAt))
         && (manifest.playback.mediaId === null
