@@ -27,7 +27,11 @@ class FakeVideo extends FakeImage {
     videoWidth = 1200;
     videoHeight = 600;
     readyState = 2;
+    networkState = 2;
+    duration = 60;
     currentTime = 0;
+    paused = true;
+    seeking = false;
     muted = false;
     playsInline = false;
     playCalls = 0;
@@ -41,11 +45,13 @@ class FakeVideo extends FakeImage {
 
     play() {
         this.playCalls += 1;
+        this.paused = false;
         return Promise.resolve();
     }
 
     pause() {
         this.pauseCalls += 1;
+        this.paused = true;
     }
 
     removeAttribute(name) {
@@ -360,6 +366,25 @@ test('preloads the next image and reuses its decoded source when published', () 
     assert.equal(drawCalls(canvas).length, 1);
 });
 
+test('preloads only video metadata and reuses the warmed video when activated', () => {
+    const { videos, render } = setupRenderer(1);
+    assert.equal(render.preload({
+        mediaType: 'video',
+        mediaUrl: '/uploads/next.mp4'
+    }), true);
+    assert.equal(videos.length, 1);
+    assert.equal(videos[0].preload, 'metadata');
+
+    render({
+        contentType: 'video',
+        videoUrl: '/uploads/next.mp4',
+        mediaId: 'next-video',
+        updateId: 'next-update'
+    });
+    assert.equal(videos.length, 1);
+    assert.equal(videos[0].preload, 'auto');
+});
+
 test('renders a video panorama crop and synchronizes its scheduled playback timeline', () => {
     let clock = 1000;
     const { canvas, videos, render } = setupRenderer(2, undefined, { now: () => clock });
@@ -378,6 +403,10 @@ test('renders a video panorama crop and synchronizes its scheduled playback time
     assert.equal(videos[0].playsInline, true);
     assert.equal(videos[0].src, content.videoUrl);
     assert.deepEqual(drawCalls(canvas)[0].slice(2, 6), [300, 0, 300, 600]);
+    render.setAudioSettings({ mode: 'master', masterDeviceId: 'phone-1' }, 'phone-1', {
+        volume: 1,
+        enabled: true
+    });
 
     assert.equal(render.setPlayback({
         status: 'playing',
@@ -404,16 +433,131 @@ test('renders a video panorama crop and synchronizes its scheduled playback time
         timelineId: 'timeline-1',
         volume: 0.25
     });
-    assert.equal(videos[0].currentTime, 3.4);
+    assert.equal(videos[0].currentTime, 3);
     assert.equal(videos[0].volume, 0.25);
     assert.equal(videos[0].muted, false);
+    assert.equal(videos[0].playbackRate, 1);
+    clock = 2600;
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'video-1',
+        positionSeconds: 3,
+        startedAt: 1000,
+        serverNow: 2600,
+        timelineId: 'timeline-1',
+        volume: 0.25
+    });
+    assert.equal(videos[0].currentTime, 4.6);
     assert.deepEqual(render.getPlaybackReport(), {
         mediaId: 'video-1',
-        positionSeconds: 3.4
+        positionSeconds: 4.6,
+        expectedPositionSeconds: 4.6,
+        driftSeconds: 0,
+        status: 'Playing',
+        readyState: 2,
+        networkState: 2,
+        bufferingState: 'idle',
+        playbackRate: 1,
+        muted: false,
+        volume: 0.25,
+        lastSuccessfulSynchronization: 2600
     });
 
     render({ ...content, updateId: 'video-update-2' });
     assert.equal(videos.length, 1);
+});
+
+test('detects waiting and stalled video, then recovers without reloading the source', () => {
+    const scheduled = [];
+    const { videos, render, statuses } = setupRenderer(1, undefined, {
+        now: () => 10_000,
+        scheduleTimeout: (callback) => {
+            scheduled.push(callback);
+            return scheduled.length;
+        },
+        cancelTimeout: () => {}
+    });
+    render({
+        contentType: 'video',
+        videoUrl: '/uploads/frozen.mp4',
+        mediaId: 'frozen-video',
+        updateId: 'frozen-update'
+    });
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'frozen-video',
+        positionSeconds: 0,
+        startedAt: 10_000,
+        serverNow: 10_000,
+        timelineId: 'frozen-timeline',
+        volume: 0
+    });
+    const source = videos[0].src;
+    videos[0].onwaiting();
+    assert.equal(render.getPlaybackReport().status, 'Buffering');
+    scheduled.shift()();
+    assert.equal(render.getPlaybackReport().status, 'Recovering');
+    assert.equal(videos[0].src, source);
+    assert.equal(videos[0].playCalls, 2);
+    scheduled.shift()();
+    assert.equal(render.getPlaybackReport().status, 'Stalled');
+    videos[0].oncanplay();
+    assert.equal(render.getPlaybackReport().bufferingState, 'idle');
+    assert.ok(statuses.some(([, state]) => state === 'error') === false);
+});
+
+test('reports browser-observed video errors without hiding the failure', () => {
+    const { videos, render, statuses } = setupRenderer(1);
+    render({
+        contentType: 'video',
+        videoUrl: '/uploads/bad.mp4',
+        mediaId: 'bad-video',
+        updateId: 'bad-update'
+    });
+    videos[0].onerror();
+    assert.equal(render.getPlaybackReport().status, 'Error');
+    assert.equal(render.getPlaybackReport().bufferingState, 'error');
+    assert.ok(statuses.some(([message, state]) =>
+        message.includes('Video failed to load') && state === 'error'));
+});
+
+test('applies local volume and mute changes directly to the video element', () => {
+    const { videos, render } = setupRenderer(1, undefined, { now: () => 20_000 });
+    render({
+        contentType: 'video',
+        videoUrl: '/uploads/audio.mp4',
+        mediaId: 'audio-video',
+        updateId: 'audio-update'
+    });
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'audio-video',
+        positionSeconds: 0,
+        startedAt: 20_000,
+        serverNow: 20_000,
+        timelineId: 'audio-timeline',
+        volume: 0.8
+    });
+    render.setAudioSettings({ mode: 'all', masterDeviceId: null }, 'phone-audio', {
+        volume: 0.35,
+        enabled: false
+    });
+    assert.ok(Math.abs(videos[0].volume - 0.28) < 0.000001);
+    assert.equal(videos[0].muted, true);
+
+    render.setAudioSettings({ mode: 'all', masterDeviceId: null }, 'phone-audio', {
+        volume: 0.35,
+        enabled: true
+    });
+    assert.ok(Math.abs(videos[0].volume - 0.28) < 0.000001);
+    assert.equal(videos[0].muted, false);
+
+    render.setAudioSettings({ mode: 'master', masterDeviceId: 'phone-audio' }, 'phone-audio', {
+        volume: 0.5,
+        enabled: true
+    });
+    assert.equal(videos[0].volume, 0.4);
+    assert.equal(videos[0].muted, false);
 });
 
 test('draws video frames on video-frame callbacks and cancels them when playback pauses', () => {

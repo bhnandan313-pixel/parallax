@@ -27,6 +27,65 @@ body,
     background: #000;
 }
 
+.panorama-container:fullscreen,
+.panorama-container:-webkit-full-screen {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    background: #000;
+}
+
+.panorama-container:fullscreen .status-panel,
+.panorama-container:-webkit-full-screen .status-panel {
+    display: none;
+}
+
+.phone-controls {
+    position: absolute;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: max(12px, env(safe-area-inset-left));
+    z-index: 8;
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font: 13px Arial, sans-serif;
+    opacity: 1;
+    transition: opacity 180ms ease;
+}
+
+.phone-controls.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.phone-controls button {
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 1px solid #ffffff55;
+    border-radius: 7px;
+    background: #25232dcc;
+    color: #fff;
+    font: inherit;
+}
+
+.phone-controls input[type="range"] {
+    width: min(28vw, 150px);
+    accent-color: #a78bfa;
+}
+
+.phone-playback-status {
+    margin-right: auto;
+    color: #d7c8f5;
+}
+
 #panorama {
     position: absolute;
     top: 0;
@@ -162,6 +221,10 @@ body,
     .identify-overlay,
     .identify-overlay.is-visible {
         animation: none;
+        transition: none;
+    }
+
+    .phone-controls {
         transition: none;
     }
 }

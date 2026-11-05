@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { DEFAULT_AUDIO_SETTINGS, validateAudioSettings } from '../src/media/audio.js';
 
 export function createDefaultMediaManifest() {
     return {
@@ -26,7 +27,8 @@ export function createDefaultMediaManifest() {
             playlistIndex: 0,
             nextPlaylistIndex: null,
             transition: 'none'
-        }
+        },
+        audioSettings: { ...DEFAULT_AUDIO_SETTINGS }
     };
 }
 
@@ -119,6 +121,9 @@ export async function loadMediaManifest(filePath) {
     if (manifest.playback.volume === undefined) {
         manifest.playback.volume = 0;
     }
+    if (manifest.audioSettings === undefined) {
+        manifest.audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
+    }
     if (!manifest.uploadHistory.every(validateUploadHistoryEntry)) {
         throw new Error('Media manifest has an unsupported or invalid upload history');
     }
@@ -169,6 +174,8 @@ function isValidMediaManifest(manifest) {
         && ['image', 'video'].includes(manifest.currentContent.contentType)
         && typeof manifest.currentContent.updateId === 'string'
         && manifest.playback && typeof manifest.playback === 'object'
+        && (manifest.audioSettings === undefined
+            || validateAudioSettings(manifest.audioSettings))
         && ['playing', 'paused', 'stopped'].includes(manifest.playback.status)
         && Number.isFinite(manifest.playback.positionSeconds)
         && manifest.playback.positionSeconds >= 0

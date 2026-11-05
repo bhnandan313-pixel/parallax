@@ -4,6 +4,8 @@ import { confirmLayoutReset } from './layout-reset.js';
 import { createDefaultLayout, validateDisplayLayout } from '../display/geometry.js';
 import { expectedPlaybackPosition } from '../media/playback.js';
 import { synchronizePreviewVideo } from '../media/preview-sync.js';
+import { createAudioSettings, DEFAULT_AUDIO_SETTINGS } from '../media/audio.js';
+import { isFullscreen, toggleFullscreen } from '../media/fullscreen.js';
 import QRCode from 'qrcode';
 import './controller.css';
 
@@ -131,6 +133,9 @@ export function mountController() {
                         <div class="current-image" data-current-image>
                             <div class="current-placeholder">No media published yet</div>
                         </div>
+                        <button class="alignment-action" type="button" data-controller-fullscreen>
+                            Fullscreen preview
+                        </button>
                         <p class="current-content-name" data-current-name>Waiting for content</p>
                         <p class="current-content-meta" data-current-meta>Connect a display to get started</p>
                     </section>
@@ -203,7 +208,7 @@ export function mountController() {
                     </div>
                 </div>
                 <div class="playback-controls">
-                    <h3>Playback controls</h3>
+                    <h3>Video Playback Controls</h3>
                     <div class="playback-buttons">
                         <button class="alignment-action" type="button" data-playback-previous>Previous</button>
                         <button class="alignment-action" type="button" data-playback-play>Play</button>
@@ -218,9 +223,26 @@ export function mountController() {
                     </label>
                     <label class="playback-volume">Volume
                         <input type="range" min="0" max="100" step="1" value="0"
-                            data-playback-volume aria-label="Display video volume" disabled>
+                            data-playback-volume aria-label="Master playback volume" disabled>
                         <output data-playback-volume-value>0%</output>
                     </label>
+                    <button class="alignment-action" type="button" data-playback-mute disabled>
+                        Unmute
+                    </button>
+                    <div class="audio-mode-controls">
+                        <label>Audio mode
+                            <select data-audio-mode>
+                                <option value="master">Master audio (one phone)</option>
+                                <option value="all">All devices (independent phone volume)</option>
+                            </select>
+                        </label>
+                        <label>Master phone
+                            <select data-audio-master></select>
+                        </label>
+                        <p data-audio-mode-status role="status">
+                            Master Audio Mode is active. Select a phone to enable its output.
+                        </p>
+                    </div>
                 </div>
                 <div class="schedule-controls">
                     <h3>Scheduled playback</h3>
@@ -468,6 +490,12 @@ export function mountController() {
     const playbackPosition = root.querySelector('[data-playback-position]');
     const playbackVolume = root.querySelector('[data-playback-volume]');
     const playbackVolumeValue = root.querySelector('[data-playback-volume-value]');
+    const playbackMuteButton = root.querySelector('[data-playback-mute]');
+    const audioModeSelect = root.querySelector('[data-audio-mode]');
+    const audioMasterSelect = root.querySelector('[data-audio-master]');
+    const audioModeStatus = root.querySelector('[data-audio-mode-status]');
+    const controllerPreview = root.querySelector('[data-current-image]');
+    const controllerFullscreenButton = root.querySelector('[data-controller-fullscreen]');
     const scheduleTarget = root.querySelector('[data-schedule-target]');
     const scheduleStart = root.querySelector('[data-schedule-start]');
     const scheduleEnd = root.querySelector('[data-schedule-end]');
@@ -529,6 +557,7 @@ export function mountController() {
     let selectedFile = null;
     let selectedMediaDuration = null;
     let controllerUploadToken = null;
+    let controllerSessionReady = false;
     let previewUrl = null;
     let uploadRequest = null;
     let calibrationEnabled = false;
@@ -546,6 +575,8 @@ export function mountController() {
     let mediaSchedules = [];
     let currentMediaId = null;
     let currentPlayback = null;
+    let lastNonzeroPlaybackVolume = 0.5;
+    let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
     let previewServerTimeOffset = 0;
     let previewSyncTimer = null;
     let playbackVolumeTimer = null;
@@ -899,6 +930,13 @@ export function mountController() {
                 <p>Latest settings: <strong data-diagnostic-sync>Unknown</strong></p>
                 <p>Last activity: <strong data-diagnostic-activity>Unknown</strong></p>
                 <p>Image status: <strong data-diagnostic-image>Unknown</strong></p>
+                <p>Playback status: <strong data-diagnostic-playback-status>Unknown</strong></p>
+                <p>Position / expected: <strong data-diagnostic-playback-position>Unknown</strong></p>
+                <p>Drift: <strong data-diagnostic-playback-drift>Unknown</strong></p>
+                <p>Ready / network state: <strong data-diagnostic-ready-state>Unknown</strong></p>
+                <p>Buffer / rate: <strong data-diagnostic-buffering>Unknown</strong></p>
+                <p>Audio: <strong data-diagnostic-audio>Unknown</strong></p>
+                <p>Last sync: <strong data-diagnostic-last-sync>Unknown</strong></p>
             </article>
         `).join('');
         screenCountSelect.value = String(totalScreens);
@@ -1966,6 +2004,11 @@ export function mountController() {
         const volumePercent = Math.round((Number.isFinite(timeline.volume)
             ? Math.min(1, Math.max(0, timeline.volume))
             : 0) * 100);
+        if (volumePercent > 0) {
+            lastNonzeroPlaybackVolume = volumePercent / 100;
+        }
+        playbackMuteButton.textContent = volumePercent > 0 ? 'Mute' : 'Unmute';
+        playbackMuteButton.disabled = !socket.connected;
         if (document.activeElement !== playbackVolume) {
             playbackVolume.value = String(volumePercent);
             playbackVolumeValue.value = `${volumePercent}%`;
@@ -1992,6 +2035,27 @@ export function mountController() {
             previewSyncTimer = null;
         }
     }
+
+    function updateFullscreenButton() {
+        controllerFullscreenButton.textContent = isFullscreen(controllerPreview)
+            ? 'Exit fullscreen preview'
+            : 'Fullscreen preview';
+    }
+
+    controllerFullscreenButton.addEventListener('click', async () => {
+        try {
+            if (!await toggleFullscreen(controllerPreview)) {
+                setMediaStatus('Fullscreen is not supported by this browser.', true);
+                return;
+            }
+            updateFullscreenButton();
+        } catch (error) {
+            console.error('Unable to toggle controller preview fullscreen:', error);
+            setMediaStatus('Unable to open fullscreen preview on this browser.', true);
+        }
+    });
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
 
     function handleMediaSnapshot(snapshot) {
         if (!snapshot || !Array.isArray(snapshot.media)
@@ -2020,6 +2084,10 @@ export function mountController() {
             }));
         mediaPlaylists = snapshot.playlists;
         mediaSchedules = snapshot.schedules;
+        if (snapshot.audioSettings) {
+            audioSettings = createAudioSettings(snapshot.audioSettings);
+            renderAudioControls();
+        }
         currentMediaId = snapshot.playback?.mediaId ?? null;
         renderMediaLibrary();
         renderPlaylists();
@@ -2111,6 +2179,7 @@ export function mountController() {
     function setDevices(devices) {
         markServerCommunication();
         registeredDevices = Array.isArray(devices) ? devices : [];
+        renderAudioControls();
         const connectedDevices = registeredDevices.filter((device) =>
             device.connected && device.enabled !== false);
         const connectedIds = new Set(connectedDevices.map((device) => device.id));
@@ -2166,6 +2235,63 @@ export function mountController() {
             `).join('')
             : '<p class="network-note">No registered devices.</p>';
         renderDashboard();
+    }
+
+    function renderAudioControls() {
+        audioModeSelect.value = audioSettings.mode;
+        const selectedMaster = audioSettings.masterDeviceId ?? '';
+        const options = [new Option('No master selected', '')];
+        for (const device of registeredDevices) {
+            options.push(new Option(
+                `Screen ${device.screen ?? 'unassigned'} · ${device.id}${device.connected ? '' : ' · disconnected'}`,
+                device.id
+            ));
+        }
+        audioMasterSelect.replaceChildren(...options);
+        audioMasterSelect.value = selectedMaster;
+        audioMasterSelect.disabled = !controllerSessionReady || audioSettings.mode !== 'master';
+        audioModeSelect.disabled = !controllerSessionReady;
+        audioModeStatus.textContent = audioSettings.mode === 'master'
+            ? audioSettings.masterDeviceId
+                ? `Master Audio Mode: ${audioSettings.masterDeviceId} is the only phone allowed to output audio.`
+                : 'Master Audio Mode is active. Select a phone to enable its output.'
+            : 'All Devices Audio Mode is active. Each phone controls its own volume and mute state.';
+        if (audioSettings.mode === 'all') {
+            audioModeStatus.textContent += ' Audio on multiple phones can echo; lower device volumes or use headphones.';
+        }
+        if (socket.connected && !controllerSessionReady) {
+            audioModeStatus.textContent =
+                'Waiting for controller authorization from the Parallax server.';
+        }
+    }
+
+    function saveAudioSettings() {
+        if (!controllerSessionReady) {
+            renderAudioControls();
+            audioModeStatus.textContent =
+                'Audio settings require the updated Parallax server. Restart the server and reconnect.';
+            return;
+        }
+        const settings = createAudioSettings({
+            mode: audioModeSelect.value,
+            masterDeviceId: audioModeSelect.value === 'master'
+                ? audioMasterSelect.value || null
+                : null
+        });
+        socket.timeout(5000).emit('audio:settings', settings, (error, response) => {
+            if (error || !response?.ok) {
+                setMediaStatus(error
+                    ? 'Audio settings were not acknowledged. Restart the Parallax server and reconnect.'
+                    : response?.message || 'Unable to update audio settings.', true);
+                renderAudioControls();
+                return;
+            }
+            audioSettings = createAudioSettings(response.audioSettings);
+            renderAudioControls();
+            setMediaStatus(audioSettings.mode === 'master'
+                ? 'Master Audio Mode updated.'
+                : 'All Devices Audio Mode updated.');
+        });
     }
 
     function escapeHtml(value) {
@@ -2303,6 +2429,38 @@ export function mountController() {
                             : device?.loadedUpdateId
                                 ? 'Showing previous content'
                                 : 'Waiting for image result';
+            const playback = connectionStatus === 'connected' ? device?.playback : null;
+            panel.querySelector('[data-diagnostic-playback-status]').textContent =
+                playback?.status ?? (connectionStatus === 'disconnected'
+                    ? 'Disconnected' : 'Unknown');
+            panel.querySelector('[data-diagnostic-playback-position]').textContent =
+                playback && Number.isFinite(playback.positionSeconds)
+                    && Number.isFinite(playback.expectedPositionSeconds)
+                    ? `${formatDuration(playback.positionSeconds)} / ${formatDuration(playback.expectedPositionSeconds)}`
+                    : 'Unknown';
+            panel.querySelector('[data-diagnostic-playback-drift]').textContent =
+                playback && Number.isFinite(playback.driftSeconds)
+                    ? `${(playback.driftSeconds * 1000).toFixed(0)} ms`
+                    : 'Unknown';
+            panel.querySelector('[data-diagnostic-ready-state]').textContent =
+                playback && Number.isInteger(playback.readyState)
+                    && Number.isInteger(playback.networkState)
+                    ? `${playback.readyState} / ${playback.networkState}`
+                    : 'Unknown';
+            panel.querySelector('[data-diagnostic-buffering]').textContent =
+                playback && typeof playback.bufferingState === 'string'
+                    && Number.isFinite(playback.playbackRate)
+                    ? `${playback.bufferingState} / ${playback.playbackRate.toFixed(2)}×`
+                    : 'Unknown';
+            panel.querySelector('[data-diagnostic-audio]').textContent =
+                playback && typeof playback.muted === 'boolean'
+                    && Number.isFinite(playback.volume)
+                    ? `${playback.muted ? 'Muted' : 'Audible'} · ${Math.round(playback.volume * 100)}%`
+                    : 'Unknown';
+            panel.querySelector('[data-diagnostic-last-sync]').textContent =
+                Number.isFinite(playback?.lastSuccessfulSynchronization)
+                    ? new Date(playback.lastSuccessfulSynchronization).toLocaleTimeString()
+                    : 'Unknown';
         }
         renderDashboardScreens();
         renderDashboardDevices();
@@ -2776,6 +2934,21 @@ export function mountController() {
             volume: Number(playbackVolume.value) / 100
         }, (response) => setPlaybackSnapshot(response.playback));
     });
+    playbackMuteButton.addEventListener('click', () => {
+        const currentVolume = Number(playbackVolume.value) / 100;
+        const nextVolume = currentVolume > 0 ? 0 : lastNonzeroPlaybackVolume;
+        playbackVolume.value = String(Math.round(nextVolume * 100));
+        playbackVolumeValue.value = `${playbackVolume.value}%`;
+        playbackVolumeValue.textContent = `${playbackVolume.value}%`;
+        sendMediaCommand('playback:volume', { volume: nextVolume }, (response) => {
+            setPlaybackSnapshot(response.playback);
+        });
+    });
+    audioModeSelect.addEventListener('change', () => {
+        audioMasterSelect.disabled = audioModeSelect.value !== 'master' || !socket.connected;
+        saveAudioSettings();
+    });
+    audioMasterSelect.addEventListener('change', saveAudioSettings);
 
     scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     root.querySelector('[data-schedule-create]').addEventListener('click', () => {
@@ -2822,14 +2995,27 @@ export function mountController() {
         screenCountSelect.disabled = false;
         addDeviceButton.disabled = false;
         playbackVolume.disabled = false;
+        playbackMuteButton.disabled = false;
+        renderAudioControls();
         scheduleTimezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
         setDevices(registeredDevices);
-        socket.emit('controller:register', (result) => {
-            controllerUploadToken = result?.ok ? result.uploadToken : null;
+        socket.timeout(5000).emit('controller:register', (error, result) => {
+            controllerSessionReady = !error && result?.ok === true
+                && result.capabilities?.audioSettings === true;
+            controllerUploadToken = !error && result?.ok ? result.uploadToken : null;
             publishButton.disabled = !selectedFile || !controllerUploadToken;
+            renderAudioControls();
+            if (!error && result?.ok && !controllerSessionReady) {
+                audioModeStatus.textContent =
+                    'Audio settings are unsupported by the running server. Restart it to enable audio modes.';
+            } else if (error) {
+                audioModeStatus.textContent =
+                    'Controller authorization was not acknowledged. Check the server and reconnect.';
+            }
         });
     });
     socket.on('disconnect', () => {
+        controllerSessionReady = false;
         controllerUploadToken = null;
         alignmentReady = false;
         for (let screen = 1; screen <= 12; screen += 1) {
@@ -2844,6 +3030,7 @@ export function mountController() {
         screenCountSelect.disabled = true;
         addDeviceButton.disabled = true;
         playbackVolume.disabled = true;
+        playbackMuteButton.disabled = true;
         publishButton.disabled = true;
         playlistSaveButton.disabled = true;
         playlistLoadButton.disabled = true;
@@ -2894,6 +3081,10 @@ export function mountController() {
         handleMediaSnapshot(snapshot);
     });
     socket.on('playback:current', setPlaybackSnapshot);
+    socket.on('audio:settings', (settings) => {
+        audioSettings = createAudioSettings(settings);
+        renderAudioControls();
+    });
     socket.on('presets:current', (state) => {
         markServerCommunication();
         setPresets(state?.presets);

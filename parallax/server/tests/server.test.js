@@ -106,6 +106,9 @@ function registerDevice(url, deviceId) {
         const initialAlignment = new Promise((resolve) => {
             socket.once('alignment:update', resolve);
         });
+        const initialAudioSettings = new Promise((resolve) => {
+            socket.once('audio:settings', resolve);
+        });
         const timer = setTimeout(() => {
             socket.disconnect();
             reject(new Error(`Timed out registering ${deviceId}`));
@@ -123,7 +126,8 @@ function registerDevice(url, deviceId) {
                 assignment,
                 initialContent,
                 initialCalibration,
-                initialAlignment
+                initialAlignment,
+                initialAudioSettings
             });
         });
         socket.once('device:rejected', (result) => {
@@ -1694,6 +1698,7 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         clients.push(controller);
         const controllerSession = await emitAck(controller, 'controller:register');
         assert.equal(controllerSession.ok, true);
+        assert.deepEqual(controllerSession.capabilities, { audioSettings: true });
         const unregisteredClient = await connectClient(server.url);
         clients.push(unregisteredClient);
         assert.equal((await emitAck(unregisteredClient, 'media:publish', {
@@ -1793,6 +1798,11 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         const second = await registerDevice(server.url, 'media-phone-two');
         clients.push(second.socket);
 
+        assert.equal((await emitAck(first.socket, 'audio:settings', {
+            mode: 'all',
+            masterDeviceId: null
+        })).ok, false);
+
         const firstContent = nextMatchingEvent(
             first.socket,
             'content:update',
@@ -1821,6 +1831,26 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
             .playback.volume, 0.35);
         assert.equal((await emitAck(controller, 'playback:volume', { volume: 1.1 })).ok, false);
 
+        const audioSettingsEvent = nextEvent(first.socket, 'audio:settings');
+        const audioSettingsUpdate = await emitAck(controller, 'audio:settings', {
+            mode: 'master',
+            masterDeviceId: 'media-phone-one'
+        });
+        assert.equal(audioSettingsUpdate.ok, true);
+        assert.deepEqual(await audioSettingsEvent, {
+            mode: 'master',
+            masterDeviceId: 'media-phone-one'
+        });
+        assert.equal((await emitAck(controller, 'audio:settings', {
+            mode: 'all',
+            masterDeviceId: 'media-phone-one'
+        })).ok, false);
+        assert.deepEqual(JSON.parse(await readFile(server.mediaManifestFile, 'utf8'))
+            .audioSettings, {
+            mode: 'master',
+            masterDeviceId: 'media-phone-one'
+        });
+
         const firstPlayTimeline = nextEvent(first.socket, 'playback:sync');
         const secondPlayTimeline = nextEvent(second.socket, 'playback:sync');
         const playing = await emitAck(controller, 'playback:play', {});
@@ -1844,6 +1874,33 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         const seek = await emitAck(controller, 'playback:seek', { positionSeconds: 12 });
         assert.equal(seek.ok, true);
         assert.equal(seek.playback.positionSeconds, 12);
+
+        const diagnosticUpdate = nextMatchingEvent(
+            controller,
+            'diagnostics:update',
+            (snapshot) => snapshot.devices.some((device) =>
+                device.deviceId === 'media-phone-one' && device.playback?.status === 'Buffering')
+        );
+        first.socket.emit('playback:drift', {
+            mediaId: firstVideo.id,
+            positionSeconds: 12,
+            expectedPositionSeconds: 12,
+            driftSeconds: 0,
+            status: 'Buffering',
+            readyState: 2,
+            networkState: 2,
+            bufferingState: 'buffering',
+            playbackRate: 1,
+            muted: true,
+            volume: 0,
+            lastSuccessfulSynchronization: Date.now()
+        });
+        const diagnostics = await diagnosticUpdate;
+        const playbackDiagnostics = diagnostics.devices.find(
+            (device) => device.deviceId === 'media-phone-one'
+        ).playback;
+        assert.equal(playbackDiagnostics.readyState, 2);
+        assert.equal(playbackDiagnostics.bufferingState, 'buffering');
 
         const driftCorrection = nextEvent(first.socket, 'playback:sync');
         first.socket.emit('playback:drift', {
@@ -1952,9 +2009,17 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
         const snapshot = await restoredSnapshot;
         assert.equal(snapshot.media.length, 4);
         assert.equal(snapshot.schedules.length, 1);
+        assert.deepEqual(snapshot.audioSettings, {
+            mode: 'master',
+            masterDeviceId: 'media-phone-one'
+        });
 
         const restoredPhone = await registerDevice(server.url, 'media-phone-one');
         clients.push(restoredPhone.socket);
+        assert.deepEqual(await restoredPhone.initialAudioSettings, {
+            mode: 'master',
+            masterDeviceId: 'media-phone-one'
+        });
         const scheduledContent = nextMatchingEvent(
             restoredPhone.socket,
             'content:update',

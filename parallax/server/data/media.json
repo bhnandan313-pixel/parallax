@@ -62,23 +62,28 @@
   "schedules": [],
   "activeScheduleId": null,
   "currentContent": {
-    "contentType": "image",
-    "imageUrl": "http://10.240.248.206:3001/uploads/8025e7f2-fa37-46de-9b30-3f84267138d4.png",
-    "updateId": "b33c8035-a49b-4789-be1f-f2400f864583",
-    "mediaId": "4ed9fe45-2c54-4b2e-b88a-932139282e68",
-    "durationSeconds": null,
+    "contentType": "video",
+    "videoUrl": "http://10.240.248.206:3001/uploads/494c5ff6-fe19-42eb-9b5b-a3c5f66f8d23.mp4",
+    "updateId": "72cf9e18-b265-4e70-96f2-cfb3621526bf",
+    "mediaId": "6fdccfc4-be4d-4cc7-96ca-f3d2db685d64",
+    "durationSeconds": 213.011458,
     "transition": "none",
-    "transitionAt": 1793798600398
+    "transitionAt": 1793884138698
   },
   "playback": {
     "status": "stopped",
-    "mediaId": "4ed9fe45-2c54-4b2e-b88a-932139282e68",
+    "mediaId": "6fdccfc4-be4d-4cc7-96ca-f3d2db685d64",
     "positionSeconds": 0,
+    "volume": 1,
     "startedAt": null,
-    "timelineId": "b20843ea-f0e4-44f3-9daa-a29831120905",
+    "timelineId": "313506dc-d97a-428a-a79b-aef1a0466282",
     "playlistId": null,
     "playlistIndex": 0,
     "nextPlaylistIndex": null,
     "transition": "none"
+  },
+  "audioSettings": {
+    "mode": "all",
+    "masterDeviceId": null
   }
 }

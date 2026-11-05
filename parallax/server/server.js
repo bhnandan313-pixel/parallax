@@ -20,6 +20,10 @@ import {
     TRANSITIONS
 } from '../src/media/playback.js';
 import {
+    createAudioSettings,
+    validateAudioSettings
+} from '../src/media/audio.js';
+import {
     createDefaultMediaManifest,
     loadMediaManifest,
     validateMediaItem,
@@ -151,6 +155,7 @@ export function createParallaxServer({
     };
     let mediaManifest = createDefaultMediaManifest();
     let playbackState = { ...mediaManifest.playback };
+    let audioSettings = createAudioSettings(mediaManifest.audioSettings);
     let mediaUpdateQueue = Promise.resolve();
     let scheduleTimer = null;
     let contentUpdatedAt = null;
@@ -389,6 +394,7 @@ export function createParallaxServer({
         mediaManifest = loadedMediaManifest;
         currentContent = { ...mediaManifest.currentContent };
         playbackState = { ...mediaManifest.playback };
+        audioSettings = createAudioSettings(mediaManifest.audioSettings);
         for (const [id, screen] of Object.entries(persistedAssignments)) {
             devices.set(id, createDeviceRecord(id, screen));
         }
@@ -407,6 +413,7 @@ export function createParallaxServer({
             mediaManifest = next;
             currentContent = { ...next.currentContent };
             playbackState = { ...next.playback };
+            audioSettings = createAudioSettings(next.audioSettings);
             return structuredClone(next);
         });
         mediaUpdateQueue = operation.catch(() => {});
@@ -431,6 +438,7 @@ export function createParallaxServer({
             schedules: structuredClone(mediaManifest.schedules),
             currentContent: { ...currentContent },
             playback: createPlaybackTimeline(playbackState),
+            audioSettings: { ...audioSettings },
             uploadLimitBytes: MAX_VIDEO_UPLOAD_BYTES
         };
     }
@@ -449,6 +457,14 @@ export function createParallaxServer({
             io.sockets.sockets.get(controllerId)?.emit('playback:current', timeline);
         }
         return timeline;
+    }
+
+    function broadcastAudioSettings() {
+        const settings = { ...audioSettings };
+        io.to(deviceRoom).emit('audio:settings', settings);
+        for (const controllerId of controllers) {
+            io.sockets.sockets.get(controllerId)?.emit('audio:settings', settings);
+        }
     }
 
     function findMedia(mediaId) {
@@ -1063,7 +1079,8 @@ export function createParallaxServer({
                     loadedUpdateId: device?.loadedUpdateId ?? null,
                     alignmentSynced: enabled && device?.socketId
                         ? device.reportedAlignmentRevision === alignmentRevision
-                        : null
+                        : null,
+                    playback: device?.socketId ? device.playbackDiagnostics : null
                 };
             })
         };
@@ -1181,6 +1198,7 @@ export function createParallaxServer({
         }
         next();
     }, express.static(uploadDirectory, {
+        acceptRanges: true,
         dotfiles: 'deny',
         index: false,
         fallthrough: false
@@ -1659,6 +1677,7 @@ export function createParallaxServer({
 
             const previousSocketId = device.socketId;
             device.socketId = socket.id;
+            device.playbackDiagnostics = null;
             socket.join(deviceRoom);
 
             if (previousSocketId && previousSocketId !== socket.id) {
@@ -1675,6 +1694,7 @@ export function createParallaxServer({
                 });
                 socket.emit('content:update', currentContent);
                 socket.emit('playback:sync', createPlaybackTimeline(playbackState));
+                socket.emit('audio:settings', { ...audioSettings });
                 socket.emit('calibration:update', { enabled: calibrationEnabled });
                 socket.emit('alignment:update', {
                     screens: getAlignmentSnapshot(),
@@ -1745,10 +1765,15 @@ export function createParallaxServer({
             controllers.add(socket.id);
             const uploadToken = randomBytes(32).toString('base64url');
             controllerUploadTokens.set(socket.id, uploadToken);
-            respond({ ok: true, uploadToken });
+            respond({
+                ok: true,
+                uploadToken,
+                capabilities: { audioSettings: true }
+            });
             socket.emit('content:current', currentContent);
             socket.emit('media:current', getMediaSnapshot());
             socket.emit('playback:current', createPlaybackTimeline(playbackState));
+            socket.emit('audio:settings', { ...audioSettings });
             socket.emit('calibration:current', {
                 enabled: calibrationEnabled
             });
@@ -1902,6 +1927,31 @@ export function createParallaxServer({
             const timeline = broadcastPlayback();
             broadcastMediaSnapshot();
             respond({ ok: true, playback: timeline });
+        });
+        socket.on('audio:settings', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized audio settings request' });
+                return;
+            }
+            if (!validateAudioSettings(request)
+                || (request.masterDeviceId !== null && !devices.has(request.masterDeviceId))
+                || (request.mode === 'all' && request.masterDeviceId !== null)) {
+                respond({ ok: false, message: 'Invalid audio mode or master device' });
+                return;
+            }
+            try {
+                await updateMediaManifest((manifest) => {
+                    manifest.audioSettings = createAudioSettings(request);
+                });
+            } catch (error) {
+                console.error('Unable to persist audio settings:', error);
+                respond({ ok: false, message: 'Unable to save audio settings' });
+                return;
+            }
+            broadcastAudioSettings();
+            broadcastMediaSnapshot();
+            respond({ ok: true, audioSettings: { ...audioSettings } });
         });
         socket.on('playback:next', (request, acknowledge) =>
             navigatePlaylist(socket, request, acknowledge, 1));
@@ -2555,19 +2605,62 @@ export function createParallaxServer({
         });
 
         socket.on('playback:drift', (report) => {
-            if (!report || typeof report !== 'object'
+            const hasDiagnostics = Boolean(report && typeof report === 'object'
+                && report.status !== undefined);
+            if (!report || typeof report !== 'object' || Array.isArray(report)
                 || typeof report.mediaId !== 'string'
                 || !Number.isFinite(report.positionSeconds)
                 || report.positionSeconds < 0) {
                 return;
             }
+            if (hasDiagnostics && (
+                (report.expectedPositionSeconds !== null
+                    && !Number.isFinite(report.expectedPositionSeconds))
+                || (report.driftSeconds !== null && !Number.isFinite(report.driftSeconds))
+                || !['Playing', 'Paused', 'Stopped', 'Buffering', 'Stalled',
+                    'Recovering', 'Error'].includes(report.status)
+                || !Number.isInteger(report.readyState)
+                || report.readyState < 0 || report.readyState > 4
+                || !Number.isInteger(report.networkState)
+                || report.networkState < 0 || report.networkState > 3
+                || !['idle', 'buffering', 'error'].includes(report.bufferingState)
+                || !Number.isFinite(report.playbackRate)
+                || report.playbackRate < 0.25 || report.playbackRate > 4
+                || typeof report.muted !== 'boolean'
+                || !Number.isFinite(report.volume)
+                || report.volume < 0 || report.volume > 1
+                || (report.lastSuccessfulSynchronization !== null
+                    && !Number.isFinite(report.lastSuccessfulSynchronization)))) {
+                return;
+            }
             const device = [...devices.values()].find(({ socketId }) => socketId === socket.id);
-            if (!device || !device.socketId || playbackState.status !== 'playing'
-                || playbackState.mediaId !== report.mediaId
-                || Date.now() - (device.lastPlaybackCorrectionAt ?? 0) < 1500) {
+            if (!device || !device.socketId || playbackState.mediaId !== report.mediaId) {
                 return;
             }
             const expected = getPlaybackPosition(playbackState);
+            if (hasDiagnostics) {
+                device.playbackDiagnostics = {
+                    positionSeconds: report.positionSeconds,
+                    expectedPositionSeconds: expected,
+                    driftSeconds: expected - report.positionSeconds,
+                    status: report.status,
+                    readyState: report.readyState,
+                    networkState: report.networkState,
+                    bufferingState: report.bufferingState,
+                    playbackRate: report.playbackRate,
+                    muted: report.muted,
+                    volume: report.volume,
+                    lastSuccessfulSynchronization: report.lastSuccessfulSynchronization
+                };
+            }
+            device.lastActivity = new Date().toISOString();
+            if (hasDiagnostics) {
+                broadcastDiagnostics();
+            }
+            if (playbackState.status !== 'playing'
+                || Date.now() - (device.lastPlaybackCorrectionAt ?? 0) < 1500) {
+                return;
+            }
             if (Math.abs(expected - report.positionSeconds) > 0.3) {
                 device.lastPlaybackCorrectionAt = Date.now();
                 socket.emit('playback:sync', createPlaybackTimeline(playbackState));
@@ -2910,7 +3003,8 @@ function createDeviceRecord(id, screen) {
         displayError: null,
         lastActivity: null,
         loadedUpdateId: null,
-        reportedAlignmentRevision: null
+        reportedAlignmentRevision: null,
+        playbackDiagnostics: null
     };
 }
 

@@ -3,6 +3,14 @@ import { createParallaxSocket } from './core/socket.js';
 import { createContentRenderer } from './display/renderer.js';
 import { createDefaultLayout, validateDisplayLayout } from './display/geometry.js';
 import { mountController } from './controller/controller.js';
+import {
+    createAudioSettings,
+    DEFAULT_AUDIO_SETTINGS,
+    getDeviceAudioState,
+    loadDeviceAudioPreferences,
+    saveDeviceAudioPreferences
+} from './media/audio.js';
+import { isFullscreen, toggleFullscreen } from './media/fullscreen.js';
 import './styles/main.css';
 
 if (location.pathname === '/controller' || location.pathname === '/controller/') {
@@ -34,10 +42,129 @@ function startDisplay() {
     let identifyOverlay = null;
     let identifyTimer = null;
     let playbackDriftTimer = null;
+    let phoneControls = null;
+    let fullscreenButton = null;
+    let muteButton = null;
+    let phoneVolume = null;
+    let phoneVolumeValue = null;
+    let playbackStatusLabel = null;
+    let controlsTimer = null;
+    let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
+    let playbackVolume = 0;
+    let localAudioPreferences = { volume: 1, enabled: false };
     const alignmentByScreen = {
         1: { horizontal: 0, vertical: 0, scale: 1 },
         2: { horizontal: 0, vertical: 0, scale: 1 }
     };
+
+    function loadAudioPreferences(id) {
+        try {
+            localAudioPreferences = loadDeviceAudioPreferences(localStorage, id);
+        } catch (error) {
+            console.warn('Unable to read saved device audio volume:', error);
+        }
+    }
+
+    function saveAudioPreferences() {
+        try {
+            localAudioPreferences.volume = saveDeviceAudioPreferences(
+                localStorage,
+                deviceId,
+                localAudioPreferences.volume
+            );
+        } catch (error) {
+            console.warn('Unable to save device audio volume:', error);
+        }
+    }
+
+    function syncDeviceAudio() {
+        renderer?.setAudioSettings(audioSettings, deviceId, localAudioPreferences);
+        if (muteButton) {
+            const isMuted = getDeviceAudioState({
+                settings: audioSettings,
+                deviceId,
+                globalVolume: playbackVolume,
+                deviceVolume: localAudioPreferences.volume,
+                enabled: localAudioPreferences.enabled
+            }).muted;
+            muteButton.textContent = isMuted ? 'Enable audio' : 'Mute';
+            muteButton.setAttribute('aria-pressed', String(!isMuted));
+            phoneVolume.value = String(Math.round(localAudioPreferences.volume * 100));
+            phoneVolumeValue.textContent = `${phoneVolume.value}%`;
+        }
+    }
+
+    function createPhoneControls() {
+        const controls = document.createElement('div');
+        controls.className = 'phone-controls';
+        controls.setAttribute('aria-label', 'Video playback controls');
+        playbackStatusLabel = document.createElement('span');
+        playbackStatusLabel.className = 'phone-playback-status';
+        playbackStatusLabel.textContent = 'Paused';
+        fullscreenButton = document.createElement('button');
+        fullscreenButton.type = 'button';
+        fullscreenButton.textContent = 'Fullscreen';
+        fullscreenButton.setAttribute('aria-label', 'Enter fullscreen');
+        muteButton = document.createElement('button');
+        muteButton.type = 'button';
+        muteButton.setAttribute('aria-label', 'Enable video audio');
+        phoneVolume = document.createElement('input');
+        phoneVolume.type = 'range';
+        phoneVolume.min = '0';
+        phoneVolume.max = '100';
+        phoneVolume.step = '1';
+        phoneVolume.setAttribute('aria-label', 'Device volume');
+        phoneVolumeValue = document.createElement('output');
+        controls.append(
+            playbackStatusLabel,
+            fullscreenButton,
+            muteButton,
+            phoneVolume,
+            phoneVolumeValue
+        );
+        fullscreenButton.addEventListener('click', async () => {
+            try {
+                if (!await toggleFullscreen(display)) {
+                    showStatus('Fullscreen is not supported by this browser');
+                    return;
+                }
+                updateFullscreenButton();
+            } catch (error) {
+                console.error('Unable to toggle phone fullscreen:', error);
+                showStatus('Unable to open fullscreen on this browser');
+            }
+        });
+        controls.addEventListener('focusin', showPhoneControls);
+        muteButton.addEventListener('click', () => {
+            localAudioPreferences.enabled = !localAudioPreferences.enabled;
+            syncDeviceAudio();
+        });
+        phoneVolume.addEventListener('input', () => {
+            localAudioPreferences.volume = Number(phoneVolume.value) / 100;
+            if (localAudioPreferences.volume > 0) {
+                localAudioPreferences.enabled = true;
+            }
+            saveAudioPreferences();
+            syncDeviceAudio();
+        });
+        return controls;
+    }
+
+    function updateFullscreenButton() {
+        const fullscreen = isFullscreen(display);
+        fullscreenButton.textContent = fullscreen ? 'Exit fullscreen' : 'Fullscreen';
+        fullscreenButton.setAttribute('aria-label',
+            fullscreen ? 'Exit fullscreen' : 'Enter fullscreen');
+        renderer?.refresh();
+    }
+
+    function showPhoneControls() {
+        phoneControls?.classList.remove('is-hidden');
+        clearTimeout(controlsTimer);
+        controlsTimer = setTimeout(() => {
+            phoneControls?.classList.add('is-hidden');
+        }, 4000);
+    }
 
     function reportDeviceStatus() {
         if (!socket?.connected || !assignedScreen) {
@@ -90,6 +217,7 @@ function startDisplay() {
     let pairingPending = Boolean(pairingToken);
     try {
         deviceId = getOrCreateDeviceId();
+        loadAudioPreferences(deviceId);
     } catch (error) {
         console.error('Unable to initialize the PARALLAX device ID:', error);
         showStatus(`Connection error: ${error.message}`, 'error');
@@ -126,18 +254,28 @@ function startDisplay() {
             display = document.createElement('main');
             display.className = 'panorama-container';
             display.append(statusPanel);
+            phoneControls = createPhoneControls();
+            display.append(phoneControls);
             app.replaceChildren(display);
             renderer = createContentRenderer({
                 container: display,
                 statusPanel,
                 screen,
-                onStatus: (message, state) => showStatus(message, state)
+                onStatus: (message, state) => showStatus(message, state),
+                onPlaybackStatus: (status) => {
+                    if (playbackStatusLabel) {
+                        playbackStatusLabel.textContent = status;
+                    }
+                }
             });
             renderer.setScreenCount(totalScreens);
             renderer.setLayout(assignment.layout ?? createDefaultLayout(totalScreens));
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
+            showPhoneControls();
+            display.addEventListener('pointerdown', showPhoneControls, { passive: true });
+            display.addEventListener('touchstart', showPhoneControls, { passive: true });
         } else {
             renderer.setScreenCount(totalScreens);
             renderer.setScreen(screen);
@@ -145,6 +283,7 @@ function startDisplay() {
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         }
+        syncDeviceAudio();
         reportDeviceStatus();
         if (playbackDriftTimer === null) {
             playbackDriftTimer = setInterval(() => {
@@ -158,6 +297,8 @@ function startDisplay() {
 
     function handleUnassignment() {
         assignedScreen = null;
+        clearTimeout(controlsTimer);
+        renderer?.dispose();
         display = null;
         renderer = null;
         if (playbackDriftTimer !== null) {
@@ -282,7 +423,13 @@ function startDisplay() {
         renderer?.preload(media);
     });
     socket.on('playback:sync', (timeline) => {
+        playbackVolume = Number.isFinite(timeline?.volume) ? timeline.volume : 0;
         renderer?.setPlayback(timeline);
+        syncDeviceAudio();
+    });
+    socket.on('audio:settings', (settings) => {
+        audioSettings = createAudioSettings(settings);
+        syncDeviceAudio();
     });
     socket.on('calibration:update', (state) => {
     if (typeof state?.enabled !== 'boolean') {
@@ -375,10 +522,14 @@ function startDisplay() {
 
     window.addEventListener('pagehide', () => {
         socket.disconnect();
+        renderer?.dispose();
         clearTimeout(identifyTimer);
+        clearTimeout(controlsTimer);
         if (playbackDriftTimer !== null) {
             clearInterval(playbackDriftTimer);
         }
     }, { once: true });
     window.addEventListener('orientationchange', () => renderer?.refresh(), { passive: true });
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
 }

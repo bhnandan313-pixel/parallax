@@ -5,9 +5,10 @@ import {
     validateDisplayLayout
 } from './geometry.js';
 import {
-    expectedPlaybackPosition,
-    PLAYBACK_DRIFT_THRESHOLD_SECONDS
+    correctPlaybackDrift,
+    expectedPlaybackPosition
 } from '../media/playback.js';
+import { DEFAULT_AUDIO_SETTINGS, getDeviceAudioState } from '../media/audio.js';
 
 export function createContentRenderer({
     container,
@@ -25,6 +26,7 @@ export function createContentRenderer({
         : clearTimeout(handle),
     scheduleTimeout = (callback, delay) => setTimeout(callback, delay),
     cancelTimeout = (handle) => clearTimeout(handle),
+    onPlaybackStatus = () => {},
     now = () => Date.now(),
     getViewport = () => ({
         width: container.clientWidth || globalThis.innerWidth || 1000,
@@ -57,6 +59,18 @@ export function createContentRenderer({
     let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
     let layout = createDefaultLayout(totalScreens);
     let screenEnabled = true;
+    let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
+    let deviceId = null;
+    let deviceVolume = 1;
+    let deviceAudioEnabled = false;
+    let playbackStatus = 'Paused';
+    let bufferingState = 'idle';
+    let bufferingTimer = null;
+    let lastSeekAt = null;
+    let lastSuccessfulSynchronization = null;
+    let lastDriftCheckAt = 0;
+    let recoveryActive = false;
+    let lastFallbackFrameAt = 0;
     const canvas = createCanvas();
     canvas.id = 'panorama';
     canvas.setAttribute('aria-label', `Panorama screen ${activeScreen}`);
@@ -170,7 +184,7 @@ export function createContentRenderer({
         const height = Math.max(1, Math.round(landscape
             ? Math.min(viewport.width, viewport.height)
             : Math.max(viewport.width, viewport.height)));
-        const ratio = Math.min(3, Math.max(1, globalThis.devicePixelRatio || 1));
+        const ratio = Math.min(2, Math.max(1, globalThis.devicePixelRatio || 1));
         return {
             width: Math.round(width * ratio),
             height: Math.round(height * ratio),
@@ -277,7 +291,16 @@ export function createContentRenderer({
             frameHandle = video.requestVideoFrameCallback(callback);
             cancelPendingFrame = (handle) => video.cancelVideoFrameCallback?.(handle);
         } else {
-            frameHandle = requestFrame(callback);
+            const drawAtVideoRate = (timestamp) => {
+                const frameTime = Number.isFinite(timestamp) ? timestamp : now();
+                if (frameTime - lastFallbackFrameAt >= 33 || lastFallbackFrameAt === 0) {
+                    lastFallbackFrameAt = frameTime;
+                    callback();
+                    return;
+                }
+                frameHandle = requestFrame(drawAtVideoRate);
+            };
+            frameHandle = requestFrame(drawAtVideoRate);
             cancelPendingFrame = cancelFrame;
         }
     }
@@ -331,6 +354,17 @@ export function createContentRenderer({
         if (!video) {
             return;
         }
+        video.onloadedmetadata = null;
+        video.onended = null;
+        video.onloadeddata = null;
+        video.oncanplay = null;
+        video.onplaying = null;
+        video.onpause = null;
+        video.onwaiting = null;
+        video.onstalled = null;
+        video.onprogress = null;
+        video.ontimeupdate = null;
+        video.onerror = null;
         video.pause?.();
         video.removeAttribute?.('src');
         video.load?.();
@@ -360,29 +394,40 @@ export function createContentRenderer({
         if (!video || !timeline || !screenEnabled) {
             return;
         }
-        video.volume = Number.isFinite(timeline.volume)
-            ? Math.min(1, Math.max(0, timeline.volume))
-            : 0;
-        video.muted = video.volume === 0;
+        const audio = getDeviceAudioState({
+            settings: audioSettings,
+            deviceId,
+            globalVolume: timeline.volume,
+            deviceVolume,
+            enabled: deviceAudioEnabled
+        });
+        video.volume = audio.volume;
+        video.muted = audio.muted;
         if (video.readyState < 2) {
+            setPlaybackStatus('Buffering');
             return;
         }
         if (timeline.status !== 'playing') {
             stopVideoFrames();
             video.pause();
-            if (Math.abs(video.currentTime - timeline.positionSeconds)
-                > PLAYBACK_DRIFT_THRESHOLD_SECONDS) {
+            if (Math.abs(video.currentTime - timeline.positionSeconds) > 0.1
+                && !video.seeking) {
                 video.currentTime = timeline.positionSeconds;
+                lastSuccessfulSynchronization = now();
             }
+            video.playbackRate = 1;
+            bufferingState = 'idle';
+            setPlaybackStatus(timeline.status === 'paused' ? 'Paused' : 'Stopped');
             paint(video);
             return;
         }
         const serverNow = now() + serverTimeOffset;
         if (serverNow < timeline.startedAt) {
             video.pause();
-            if (Math.abs(video.currentTime - timeline.positionSeconds)
-                > PLAYBACK_DRIFT_THRESHOLD_SECONDS) {
+            if (Math.abs(video.currentTime - timeline.positionSeconds) > 0.1
+                && !video.seeking) {
                 video.currentTime = timeline.positionSeconds;
+                lastSuccessfulSynchronization = now();
             }
             stopVideoFrames();
             playbackStartTimer = scheduleTimeout(
@@ -393,12 +438,13 @@ export function createContentRenderer({
             return;
         }
         const target = expectedPlaybackPosition(timeline, serverNow);
-        if (Math.abs(video.currentTime - target) > PLAYBACK_DRIFT_THRESHOLD_SECONDS) {
-            video.currentTime = target;
-        }
+        applyPlaybackCorrection(video, target, serverNow);
         const playResult = video.play();
         if (playResult && typeof playResult.catch === 'function') {
-            playResult.catch(() => onStatus('Video playback could not start', 'error'));
+            playResult.catch(() => {
+                setPlaybackStatus('Error');
+                onStatus('Video playback could not start', 'error');
+            });
         }
         if (frameHandle === null) {
             const drawFrame = () => {
@@ -411,16 +457,143 @@ export function createContentRenderer({
                 }
                 const clock = now() + serverTimeOffset;
                 const expected = expectedPlaybackPosition(playbackTimeline, clock);
-                if (Math.abs(video.currentTime - expected)
-                    > PLAYBACK_DRIFT_THRESHOLD_SECONDS) {
-                    video.currentTime = expected;
+                if (clock - lastDriftCheckAt >= 1000) {
+                    lastDriftCheckAt = clock;
+                    applyPlaybackCorrection(video, expected, clock);
                 }
                 paint(video);
                 scheduleVideoFrame(video, drawFrame);
             };
             scheduleVideoFrame(video, drawFrame);
         }
+        setPlaybackStatus(bufferingState === 'buffering' || video.paused
+            ? 'Buffering'
+            : 'Playing');
         paint(video);
+    }
+
+    function setPlaybackStatus(status) {
+        if (playbackStatus === status) {
+            return;
+        }
+        playbackStatus = status;
+        onPlaybackStatus(status);
+    }
+
+    function applyPlaybackCorrection(video, target, serverNow) {
+        const result = correctPlaybackDrift(video, target, {
+            now: serverNow,
+            lastSeekAt
+        });
+        lastSeekAt = result.lastSeekAt;
+        const drift = target - video.currentTime;
+        if (result.action !== 'none' || Math.abs(drift) < 0.1) {
+            lastSuccessfulSynchronization = now();
+        }
+        return result;
+    }
+
+    function clearBufferingTimer() {
+        if (bufferingTimer !== null) {
+            cancelTimeout(bufferingTimer);
+            bufferingTimer = null;
+        }
+    }
+
+    function beginBuffering(video) {
+        bufferingState = 'buffering';
+        setPlaybackStatus('Buffering');
+        if (bufferingTimer !== null) {
+            return;
+        }
+        const startingPosition = video.currentTime;
+        bufferingTimer = scheduleTimeout(() => {
+            bufferingTimer = null;
+            if (loadedVideo !== video || playbackTimeline?.status !== 'playing') {
+                return;
+            }
+            if (video.currentTime === startingPosition || video.paused) {
+                recoverVideo(video);
+            }
+        }, 2500);
+    }
+
+    function recoverVideo(video) {
+        if (recoveryActive || loadedVideo !== video || playbackTimeline?.status !== 'playing') {
+            return;
+        }
+        recoveryActive = true;
+        setPlaybackStatus('Recovering');
+        const serverNow = now() + serverTimeOffset;
+        const target = expectedPlaybackPosition(playbackTimeline, serverNow);
+        if (video.readyState >= 2) {
+            applyPlaybackCorrection(video, target, serverNow);
+            const result = video.play();
+            if (result && typeof result.catch === 'function') {
+                result.catch(() => {
+                    recoveryActive = false;
+                    setPlaybackStatus('Error');
+                    onStatus('Video recovery could not resume playback', 'error');
+                });
+            }
+        }
+        clearBufferingTimer();
+        bufferingTimer = scheduleTimeout(() => {
+            bufferingTimer = null;
+            recoveryActive = false;
+            if (loadedVideo === video && bufferingState === 'buffering') {
+                setPlaybackStatus('Stalled');
+            }
+        }, 4000);
+    }
+
+    function watchVideo(video) {
+        video.onloadedmetadata = () => {
+            bufferingState = video.readyState >= 3 ? 'idle' : 'buffering';
+        };
+        video.oncanplay = () => {
+            bufferingState = 'idle';
+            if (playbackTimeline?.status === 'playing') {
+                synchronizeVideo();
+            }
+        };
+        video.onplaying = () => {
+            clearBufferingTimer();
+            bufferingState = 'idle';
+            recoveryActive = false;
+            setPlaybackStatus('Playing');
+        };
+        video.onpause = () => {
+            if (playbackTimeline?.status !== 'playing') {
+                setPlaybackStatus(playbackTimeline?.status === 'stopped' ? 'Stopped' : 'Paused');
+            } else if (screenEnabled
+                && now() + serverTimeOffset >= playbackTimeline.startedAt) {
+                beginBuffering(video);
+            }
+        };
+        video.onwaiting = () => beginBuffering(video);
+        video.onstalled = () => beginBuffering(video);
+        video.onprogress = () => {
+            if (video.readyState >= 3) {
+                bufferingState = 'idle';
+            }
+        };
+        video.ontimeupdate = () => {
+            if (playbackTimeline?.status !== 'playing') {
+                return;
+            }
+            const serverNow = now() + serverTimeOffset;
+            const expected = expectedPlaybackPosition(playbackTimeline, serverNow);
+            if (serverNow - lastDriftCheckAt >= 1000) {
+                lastDriftCheckAt = serverNow;
+                applyPlaybackCorrection(video, expected, serverNow);
+            }
+        };
+        video.onerror = () => {
+            bufferingState = 'error';
+            setPlaybackStatus('Error');
+            onStatus('Connection error: Video failed to load', 'error');
+        };
     }
 
     function render(content = currentContent) {
@@ -454,6 +627,9 @@ export function createContentRenderer({
             }
             const oldVideo = loadedVideo;
             stopVideoFrames();
+            clearBufferingTimer();
+            bufferingState = 'idle';
+            recoveryActive = false;
             loadedImage = content.contentType === 'image' ? source : null;
             loadedVideo = content.contentType === 'video' ? source : null;
             if (preloadedSource?.source === source) {
@@ -462,6 +638,7 @@ export function createContentRenderer({
             activeMediaUrl = mediaUrl;
             currentContent = content;
             if (content.contentType === 'video') {
+                source.preload = 'auto';
                 source.onended = () => {
                     paint(source);
                     stopVideoFrames();
@@ -500,12 +677,11 @@ export function createContentRenderer({
         const warmed = takePreloadedSource(content.contentType, mediaUrl);
         const video = warmed?.source ?? createVideo();
         video.preload = 'auto';
-        video.muted = playbackTimeline?.volume === undefined
-            || playbackTimeline.volume === 0;
+        video.muted = true;
         video.playsInline = true;
         video.crossOrigin = 'anonymous';
+        watchVideo(video);
         video.onloadeddata = () => activateSource(video);
-        video.onerror = failSource;
         if (warmed && video.readyState >= 2) {
             activateSource(video);
         } else if (!warmed) {
@@ -545,7 +721,7 @@ export function createContentRenderer({
             }
         };
         if (media.mediaType === 'video') {
-            source.preload = 'auto';
+            source.preload = 'metadata';
             source.muted = true;
             source.playsInline = true;
             source.crossOrigin = 'anonymous';
@@ -573,9 +749,42 @@ export function createContentRenderer({
         return true;
     };
 
-    render.getPlaybackReport = () => loadedVideo && currentContent?.mediaId
-        ? { mediaId: currentContent.mediaId, positionSeconds: loadedVideo.currentTime }
-        : null;
+    render.setAudioSettings = (settings, nextDeviceId, localPreferences = {}) => {
+        audioSettings = { ...settings };
+        deviceId = nextDeviceId;
+        deviceVolume = Number.isFinite(localPreferences.volume)
+            ? Math.min(1, Math.max(0, localPreferences.volume))
+            : 1;
+        deviceAudioEnabled = localPreferences.enabled === true;
+        synchronizeVideo();
+        return true;
+    };
+
+    render.getPlaybackReport = () => {
+        if (!loadedVideo || !currentContent?.mediaId) {
+            return null;
+        }
+        const expectedPositionSeconds = playbackTimeline
+            ? expectedPlaybackPosition(playbackTimeline, now() + serverTimeOffset)
+            : null;
+        const driftSeconds = Number.isFinite(expectedPositionSeconds)
+            ? expectedPositionSeconds - loadedVideo.currentTime
+            : null;
+        return {
+            mediaId: currentContent.mediaId,
+            positionSeconds: loadedVideo.currentTime,
+            expectedPositionSeconds,
+            driftSeconds,
+            status: playbackStatus,
+            readyState: loadedVideo.readyState,
+            networkState: loadedVideo.networkState,
+            bufferingState,
+            playbackRate: loadedVideo.playbackRate,
+            muted: loadedVideo.muted,
+            volume: loadedVideo.volume,
+            lastSuccessfulSynchronization
+        };
+    };
 
     render.setScreen = (nextScreen) => {
         if (!Number.isInteger(nextScreen) || nextScreen < 1 || nextScreen > totalScreens) {
@@ -608,6 +817,7 @@ export function createContentRenderer({
             canvas.hidden = true;
             loadedVideo?.pause();
             stopVideoFrames();
+            clearBufferingTimer();
             cancelContentTransition();
             discardPreloadedSource();
             if (calibrationOverlay) {
@@ -622,6 +832,17 @@ export function createContentRenderer({
                 render(currentContent);
             }
         }
+    };
+
+    render.dispose = () => {
+        stopVideoFrames();
+        clearBufferingTimer();
+        cancelContentTransition();
+        releaseVideo(loadedVideo);
+        discardPreloadedSource();
+        loadedVideo = null;
+        loadedImage = null;
+        activeMediaUrl = null;
     };
 
     render.setAlignment = (settings) => {

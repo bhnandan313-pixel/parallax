@@ -633,6 +633,23 @@ body.controller-page #app {
     object-fit: contain;
 }
 
+.current-image:fullscreen,
+.current-image:-webkit-full-screen {
+    display: grid;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    max-height: none;
+    background: #000;
+}
+
+.current-image:fullscreen video,
+.current-image:-webkit-full-screen video,
+.current-image:fullscreen img,
+.current-image:-webkit-full-screen img {
+    max-height: 100%;
+}
+
 .current-placeholder {
     color: #77727f;
     font-size: 11px;
@@ -1343,6 +1360,37 @@ body.controller-page #app {
 .playback-volume output {
     min-width: 34px;
     text-align: right;
+}
+
+.audio-mode-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px 14px;
+    margin-top: 15px;
+    color: #aaa6b4;
+    font-size: 10px;
+}
+
+.audio-mode-controls label {
+    display: grid;
+    gap: 6px;
+}
+
+.audio-mode-controls select {
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 8px;
+    border: 1px solid #393244;
+    border-radius: 7px;
+    background: #19181f;
+    color: #e6e2eb;
+    font: inherit;
+}
+
+.audio-mode-controls p {
+    grid-column: 1 / -1;
+    color: #c4a9ff;
+    line-height: 1.5;
 }
 
 .schedule-list {

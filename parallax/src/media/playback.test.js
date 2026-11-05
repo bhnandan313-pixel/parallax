@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     createPlaybackTimeline,
+    correctPlaybackDrift,
     expectedPlaybackPosition,
+    getDriftCorrection,
     getPlaybackDrift,
     getPlaylistItem,
     getPlaybackPosition,
@@ -40,6 +42,32 @@ test('playback drift correction ignores buffering-scale drift and corrects signi
     assert.ok(Math.abs(getPlaybackDrift(2.8, timeline, 13_000) - 0.2) < 0.000001);
     assert.equal(shouldCorrectPlaybackDrift(2.8, timeline, 13_000), false);
     assert.equal(shouldCorrectPlaybackDrift(2.5, timeline, 13_000), true);
+});
+
+test('playback correction uses configurable drift bands and avoids repeated seeking', () => {
+    assert.equal(getDriftCorrection(0.099), 'none');
+    assert.equal(getDriftCorrection(0.1), 'rate');
+    assert.equal(getDriftCorrection(-0.3), 'rate');
+    assert.equal(getDriftCorrection(0.301), 'seek');
+    assert.equal(getDriftCorrection(0.25, {
+        rateThresholdSeconds: 0.2,
+        seekThresholdSeconds: 0.5
+    }), 'rate');
+
+    const video = { currentTime: 1, readyState: 4, playbackRate: 1, seeking: false };
+    const rate = correctPlaybackDrift(video, 1.2, { now: 10_000 });
+    assert.equal(rate.action, 'rate');
+    assert.equal(video.playbackRate, 1.05);
+
+    const seek = correctPlaybackDrift(video, 2, { now: 10_000 });
+    assert.equal(seek.action, 'seek');
+    assert.equal(video.currentTime, 2);
+    assert.equal(video.playbackRate, 1);
+    assert.equal(correctPlaybackDrift(video, 0, {
+        now: 10_500,
+        lastSeekAt: seek.lastSeekAt
+    }).action, 'none');
+    assert.equal(video.currentTime, 2);
 });
 
 test('playlist indexing supports bounded playback and looping', () => {
