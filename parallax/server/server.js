@@ -129,6 +129,7 @@ export function createParallaxServer({
     const controllerUploadTokens = new Map();
     const pairingSessions = new Map();
     const pairingTimers = new Map();
+    const visionSessions = new Map();
     const deviceRoom = 'parallax:devices';
     const upload = multer({
         storage: multer.memoryStorage(),
@@ -168,11 +169,13 @@ export function createParallaxServer({
     let displayLayout = createDefaultLayout(MIN_SCREEN_COUNT);
     let layoutPresets = [];
     let persistedAssignments = {};
+    let deviceNames = {};
+    const deviceActivity = new Map();
     let alignmentRevision = 0;
     let settingsUpdateQueue = Promise.resolve();
 
     function getSettingsSnapshot() {
-        return {
+        const snapshot = {
             calibrationEnabled,
             totalScreens,
             assignmentMode,
@@ -190,6 +193,10 @@ export function createParallaxServer({
                 screens: cloneAlignmentSettings(screens)
             }))
         };
+        if (Object.keys(deviceNames).length > 0) {
+            snapshot.deviceNames = { ...deviceNames };
+        }
+        return snapshot;
     }
 
     async function writeSettings(settings) {
@@ -302,6 +309,28 @@ export function createParallaxServer({
                 shouldRepair = true;
             }
 
+            const storedDeviceNames = settings.deviceNames && typeof settings.deviceNames === 'object'
+                && !Array.isArray(settings.deviceNames)
+                ? settings.deviceNames
+                : {};
+            deviceNames = {};
+            for (const [deviceId, name] of Object.entries(storedDeviceNames)) {
+                if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
+                    shouldRepair = true;
+                    continue;
+                }
+                const normalized = normalizeDeviceName(name);
+                if (!normalized) {
+                    shouldRepair = true;
+                    continue;
+                }
+                deviceNames[deviceId] = normalized;
+            }
+            if (settings.deviceNames !== undefined
+                && (typeof settings.deviceNames !== 'object' || Array.isArray(settings.deviceNames))) {
+                shouldRepair = true;
+            }
+
             const presets = Array.isArray(settings.presets) ? settings.presets : [];
             const validPresets = [];
             const names = new Set();
@@ -367,6 +396,9 @@ export function createParallaxServer({
                     layout: cloneDisplayLayout(preset.layout)
                 }))
             };
+            if (Object.keys(deviceNames).length > 0) {
+                settings.deviceNames = { ...deviceNames };
+            }
         }
 
         if (shouldRepair) {
@@ -391,6 +423,7 @@ export function createParallaxServer({
         totalScreens = settings.totalScreens ?? MIN_SCREEN_COUNT;
         assignmentMode = settings.assignmentMode ?? 'automatic';
         persistedAssignments = { ...(settings.assignments ?? {}) };
+        deviceNames = { ...(settings.deviceNames ?? {}) };
         mediaManifest = loadedMediaManifest;
         currentContent = { ...mediaManifest.currentContent };
         playbackState = { ...mediaManifest.playback };
@@ -1011,6 +1044,15 @@ export function createParallaxServer({
         };
     }
 
+    function setVisionMarkerMode(enabled) {
+        for (const device of devices.values()) {
+            if (!device.socketId) {
+                continue;
+            }
+            io.sockets.sockets.get(device.socketId)?.emit('vision:marker-mode', { enabled });
+        }
+    }
+
     function emitDeviceConfiguration(device, eventName = 'device:assignment-update') {
         if (!device.socketId) {
             return;
@@ -1610,6 +1652,144 @@ export function createParallaxServer({
                     .filter(({ socketId }) => socketId !== null).length
             });
             respond({ ok: true });
+        });
+
+        socket.on('vision:camera:create', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized vision camera request' });
+                return;
+            }
+
+            const interfaces = getLanInterfaces();
+            if (interfaces.length === 0) {
+                respond({
+                    ok: false,
+                    message: 'No private IPv4 LAN address was found. Connect this laptop to the phone network and retry.'
+                });
+                return;
+            }
+
+            const token = randomBytes(32).toString('hex');
+            const expiresAt = Date.now() + (5 * 60 * 1000);
+            const visionPath = `/vision?vision=${encodeURIComponent(token)}`;
+            visionSessions.set(token, {
+                controllerId: socket.id,
+                cameraSocketId: null,
+                token,
+                expiresAt,
+                createdAt: Date.now(),
+                status: 'waiting'
+            });
+            setVisionMarkerMode(true);
+            respond({
+                ok: true,
+                token,
+                expiresAt,
+                url: visionPath,
+                interfaces,
+                status: 'waiting'
+            });
+        });
+
+        socket.on('vision:camera:join', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = request?.token;
+            if (typeof token !== 'string' || !/^[A-Za-z0-9]{32,128}$/.test(token)) {
+                respond({ ok: false, message: 'Invalid vision camera session.' });
+                return;
+            }
+            const session = visionSessions.get(token);
+            if (!session) {
+                respond({ ok: false, message: 'This vision camera session is invalid or expired.' });
+                return;
+            }
+            if (session.expiresAt <= Date.now()) {
+                visionSessions.delete(token);
+                respond({ ok: false, expired: true, message: 'This vision camera session expired.' });
+                return;
+            }
+            if (session.cameraSocketId && session.cameraSocketId !== socket.id) {
+                respond({ ok: false, message: 'This vision camera session is already in use.' });
+                return;
+            }
+            session.cameraSocketId = socket.id;
+            session.status = 'connected';
+            socket.data.visionCameraToken = token;
+            io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
+                connected: true,
+                token,
+                status: 'connected'
+            });
+            respond({ ok: true, token, status: 'connected' });
+        });
+
+        socket.on('vision:camera:report', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = socket.data.visionCameraToken;
+            if (!token) {
+                respond({ ok: false, message: 'Vision camera is not authorized.' });
+                return;
+            }
+            const session = visionSessions.get(token);
+            if (!session || session.cameraSocketId !== socket.id) {
+                respond({ ok: false, message: 'Vision camera session is invalid.' });
+                return;
+            }
+            const markers = Array.isArray(request?.markers) ? request.markers : [];
+            const validMarkers = markers
+                .filter((marker) => marker && typeof marker === 'object')
+                .map((marker) => ({
+                    id: Number(marker.id),
+                    x: Number(marker.x),
+                    y: Number(marker.y),
+                    rotation: Number(marker.rotation),
+                    confidence: Number(marker.confidence),
+                    visible: Boolean(marker.visible),
+                    timestamp: Number(marker.timestamp) || Date.now(),
+                    deviceId: typeof marker.deviceId === 'string' ? marker.deviceId : null
+                }))
+                .filter((marker) => Number.isFinite(marker.id)
+                    && Number.isFinite(marker.x)
+                    && Number.isFinite(marker.y)
+                    && Number.isFinite(marker.rotation)
+                    && Number.isFinite(marker.confidence)
+                    && marker.confidence >= 0
+                    && marker.confidence <= 1);
+            const payload = {
+                token,
+                connected: true,
+                status: validMarkers.length > 0 ? 'tracking' : 'waiting',
+                markers: validMarkers,
+                timestamp: Date.now()
+            };
+            io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:update', payload);
+            respond({ ok: true, status: payload.status, markers: validMarkers.length });
+        });
+
+        socket.on('vision:camera:disconnect', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = socket.data.visionCameraToken ?? request?.token;
+            if (!token) {
+                respond({ ok: true });
+                return;
+            }
+            const session = visionSessions.get(token);
+            if (session && session.cameraSocketId === socket.id) {
+                session.cameraSocketId = null;
+                session.status = 'waiting';
+                io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
+                    connected: false,
+                    token,
+                    status: 'waiting'
+                });
+            }
+            if (visionSessions.has(token) && !visionSessions.get(token).cameraSocketId) {
+                visionSessions.delete(token);
+                setVisionMarkerMode(false);
+            }
+            delete socket.data.visionCameraToken;
+            respond({ ok: true, status: 'disconnected' });
         });
 
         socket.on('device:register', async (deviceId) => {
@@ -2904,6 +3084,25 @@ export function createParallaxServer({
             controllers.delete(socket.id);
             controllerUploadTokens.delete(socket.id);
 
+            for (const [token, session] of visionSessions.entries()) {
+                if (session.controllerId === socket.id || session.cameraSocketId === socket.id) {
+                    if (session.controllerId === socket.id) {
+                        visionSessions.delete(token);
+                    } else {
+                        session.cameraSocketId = null;
+                        session.status = 'waiting';
+                        io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
+                            connected: false,
+                            token,
+                            status: 'waiting'
+                        });
+                    }
+                }
+            }
+            if ([...visionSessions.values()].every((session) => !session.cameraSocketId)) {
+                setVisionMarkerMode(false);
+            }
+
             for (const [deviceId, device] of devices) {
                 if (device.socketId !== socket.id) {
                     continue;
@@ -2947,6 +3146,7 @@ export function createParallaxServer({
         }
         pairingTimers.clear();
         pairingSessions.clear();
+        visionSessions.clear();
 
         await mediaUpdateQueue;
         await new Promise((resolveClose) => io.close(resolveClose));

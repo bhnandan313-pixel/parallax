@@ -1705,12 +1705,118 @@ body.controller-page #app {
     padding-left: 20px;
 }
 
+.vision-dialog {
+    width: min(480px, calc(100% - 28px));
+    margin: auto;
+    padding: 22px;
+    overflow-y: auto;
+    border: 1px solid #393244;
+    border-radius: 14px;
+    background: #14131a;
+    color: #f4f2f8;
+    box-shadow: 0 24px 80px #00000099;
+}
+
+.vision-dialog::backdrop {
+    background: #050408c9;
+    backdrop-filter: blur(4px);
+}
+
+.vision-dialog-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.vision-dialog-heading h2 {
+    margin-top: 7px;
+    font-size: 19px;
+}
+
+.vision-close {
+    width: 34px;
+    height: 34px;
+    border: 1px solid #393244;
+    border-radius: 8px;
+    background: transparent;
+    color: #d7c8f5;
+    font-size: 23px;
+    cursor: pointer;
+}
+
+.vision-qr-wrap {
+    display: grid;
+    min-height: 220px;
+    margin-top: 16px;
+    padding: 12px;
+    place-items: center;
+    border: 1px solid #2a2731;
+    border-radius: 10px;
+    background: #fff;
+    color: #24212b;
+    text-align: center;
+}
+
+.vision-qr-wrap img {
+    width: min(280px, 100%);
+    height: auto;
+    image-rendering: pixelated;
+}
+
+.vision-qr-wrap p {
+    padding: 16px;
+    font-size: 12px;
+}
+
+.vision-url-label,
+.vision-status,
+.vision-instructions {
+    display: grid;
+    gap: 7px;
+    margin-top: 14px;
+    color: #c7c3cf;
+    font-size: 11px;
+}
+
+.vision-url-label input {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 10px;
+    border: 1px solid #393244;
+    border-radius: 7px;
+    background: #19181f;
+    color: #f4f2f8;
+    font: inherit;
+}
+
+.vision-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 10px;
+}
+
+.vision-status {
+    padding: 10px;
+    border: 1px solid #2a2731;
+    border-radius: 8px;
+    background: #19181f;
+}
+
+.vision-instructions {
+    line-height: 1.6;
+}
+
 @media (max-width: 520px) {
-    .pairing-dialog {
+    .pairing-dialog,
+    .vision-dialog {
         padding: 16px;
     }
 
-    .pairing-actions > button {
+    .pairing-actions > button,
+    .vision-actions > button {
         flex: 1;
     }
 

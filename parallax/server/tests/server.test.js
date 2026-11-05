@@ -146,6 +146,73 @@ function registerDevice(url, deviceId) {
     });
 }
 
+test('creates and validates temporary vision camera sessions', async () => {
+    const server = await startServer();
+    const clients = [];
+
+    try {
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        controller.emit('controller:register');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const createSession = await new Promise((resolve) => {
+            controller.emit('vision:camera:create', null, resolve);
+        });
+        assert.equal(createSession.ok, true);
+        assert.match(createSession.url, /^\/vision\?/);
+        assert.equal(typeof createSession.token, 'string');
+
+        const camera = await connectClient(server.url);
+        clients.push(camera);
+        const joinedSession = await new Promise((resolve) => {
+            camera.emit('vision:camera:join', { token: createSession.token }, resolve);
+        });
+        assert.deepEqual(joinedSession, {
+            ok: true,
+            token: createSession.token,
+            status: 'connected'
+        });
+
+        const state = await new Promise((resolve) => {
+            const onUpdate = (payload) => {
+                controller.off('vision:camera:update', onUpdate);
+                resolve(payload);
+            };
+            controller.on('vision:camera:update', onUpdate);
+            camera.emit('vision:camera:report', {
+                markers: [{
+                    id: 42,
+                    x: 0.25,
+                    y: 0.5,
+                    rotation: 0.1,
+                    confidence: 0.9,
+                    visible: true,
+                    timestamp: Date.now(),
+                    deviceId: 'display-42'
+                }]
+            });
+        });
+        assert.equal(state.status, 'tracking');
+        assert.equal(state.markers[0].id, 42);
+
+        const invalid = await new Promise((resolve) => {
+            camera.emit('vision:camera:join', { token: 'not-a-real-token' }, resolve);
+        });
+        assert.equal(invalid.ok, false);
+
+        const disconnected = await new Promise((resolve) => {
+            camera.emit('vision:camera:disconnect', null, resolve);
+        });
+        assert.equal(disconnected.status, 'disconnected');
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
 test('authorizes and synchronizes independent screen alignment settings', async () => {
     const server = await startServer({ reservationMs: 80 });
     const clients = [];

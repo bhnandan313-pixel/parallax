@@ -98,6 +98,10 @@ export function mountController() {
                         <button class="alignment-action add-device-button" type="button" data-add-device disabled>
                             Add Device
                         </button>
+                        <button class="alignment-action" type="button" data-vision-connect disabled>
+                            Connect Vision Camera
+                        </button>
+                        <p class="network-note" data-vision-status>Vision camera not connected.</p>
                         <div class="screen-config-controls">
                             <label>Screen count
                                 <select data-screen-count disabled>
@@ -456,6 +460,38 @@ export function mountController() {
                 </ol>
             </dialog>
 
+            <dialog class="vision-dialog" data-vision-dialog aria-labelledby="vision-title">
+                <div class="vision-dialog-heading">
+                    <div>
+                        <p class="eyebrow">MOBILE VISION</p>
+                        <h2 id="vision-title">Connect vision camera</h2>
+                    </div>
+                    <button class="vision-close" type="button" data-vision-close aria-label="Close dialog">×</button>
+                </div>
+
+                <div class="vision-qr-wrap">
+                    <img data-vision-qr alt="QR code for the mobile vision camera session" hidden>
+                    <p data-vision-placeholder>Requesting a QR code for the phone camera session...</p>
+                </div>
+
+                <label class="vision-url-label">
+                    Vision URL
+                    <input type="text" data-vision-url readonly>
+                </label>
+
+                <div class="vision-actions">
+                    <button class="alignment-action" type="button" data-vision-copy disabled>Copy URL</button>
+                </div>
+
+                <div class="vision-status" role="status" aria-live="polite">
+                    <p data-vision-session-status>Waiting for a vision session.</p>
+                </div>
+
+                <p class="vision-instructions">
+                    Scan with your smartphone, then open the camera link on the same Wi‑Fi network.
+                </p>
+            </dialog>
+
             <footer class="controller-footer">
                 <span>PARALLAX · Synchronized panoramic display</span>
                 <span>Images up to 15 MB · MP4 videos up to 100 MB</span>
@@ -518,6 +554,8 @@ export function mountController() {
     const screenCountSelect = root.querySelector('[data-screen-count]');
     const assignmentModeSelect = root.querySelector('[data-assignment-mode]');
     const screenConfigSaveButton = root.querySelector('[data-screen-config-save]');
+    const visionConnectButton = root.querySelector('[data-vision-connect]');
+    const visionStatusNode = root.querySelector('[data-vision-status]');
     const alignmentGrid = root.querySelector('[data-alignment-grid]');
     const screenList = root.querySelector('[data-screen-list]');
     const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
@@ -552,6 +590,13 @@ export function mountController() {
     const pairingDeviceCount = root.querySelector('[data-pairing-device-count]');
     const pairingCopyButton = root.querySelector('[data-pairing-copy]');
     const pairingRefreshButton = root.querySelector('[data-pairing-refresh]');
+    const visionDialog = root.querySelector('[data-vision-dialog]');
+    const visionCloseButton = root.querySelector('[data-vision-close]');
+    const visionQr = root.querySelector('[data-vision-qr]');
+    const visionPlaceholder = root.querySelector('[data-vision-placeholder]');
+    const visionUrlInput = root.querySelector('[data-vision-url]');
+    const visionSessionStatus = root.querySelector('[data-vision-session-status]');
+    const visionCopyButton = root.querySelector('[data-vision-copy]');
     const socket = createParallaxSocket();
 
     let selectedFile = null;
@@ -2985,6 +3030,88 @@ export function mountController() {
         });
     });
 
+    function setVisionStatus(message) {
+        visionStatusNode.textContent = message;
+        if (visionSessionStatus) {
+            visionSessionStatus.textContent = message;
+        }
+    }
+
+    function buildVisionCameraUrl(token, interfaces = []) {
+        const wifiAddress = '10.240.248.206';
+        const preferredOrigin = new URL(window.location.origin);
+        preferredOrigin.hostname = wifiAddress;
+        preferredOrigin.port = window.location.port || preferredOrigin.port;
+
+        const cameraUrl = new URL('/vision', preferredOrigin.toString());
+        cameraUrl.searchParams.set('vision', token);
+        return cameraUrl;
+    }
+
+    async function showVisionSessionQr(token, interfaces = []) {
+        const cameraUrl = buildVisionCameraUrl(token, interfaces);
+
+        try {
+            const qrDataUrl = await QRCode.toDataURL(cameraUrl.toString(), {
+                width: 280,
+                margin: 2,
+                errorCorrectionLevel: 'H'
+            });
+
+            visionQr.src = qrDataUrl;
+            visionQr.hidden = false;
+            visionPlaceholder.hidden = true;
+            visionUrlInput.value = cameraUrl.toString();
+            visionCopyButton.disabled = false;
+            visionSessionStatus.textContent = 'QR ready. Scan with your smartphone.';
+            if (visionDialog) {
+                visionDialog.showModal();
+            }
+        } catch (error) {
+            console.error('Unable to generate the vision QR code:', error);
+            visionPlaceholder.hidden = false;
+            visionPlaceholder.textContent = 'Could not generate the camera QR code. Refresh and try again.';
+            visionSessionStatus.textContent = 'QR generation failed.';
+        }
+    }
+
+    visionConnectButton.addEventListener('click', () => {
+        if (!socket.connected) {
+            setVisionStatus('Controller is not connected to the server.');
+            return;
+        }
+        socket.timeout(5000).emit('vision:camera:create', null, (error, response) => {
+            if (error || !response?.ok) {
+                setVisionStatus(error ? 'The server did not acknowledge the vision camera request.' : response?.message || 'Unable to create a vision camera session.');
+                return;
+            }
+            setVisionStatus('Vision camera session ready. Scan the QR code below.');
+            showVisionSessionQr(response.token, response.interfaces ?? []).catch((failure) => {
+                console.error('Vision QR setup failed:', failure);
+                setVisionStatus('Vision camera session was created but the QR code could not be rendered.');
+            });
+        });
+    });
+
+    visionCopyButton.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(visionUrlInput.value);
+            visionSessionStatus.textContent = 'Vision URL copied to clipboard.';
+        } catch (error) {
+            console.error('Unable to copy the vision camera URL:', error);
+            visionSessionStatus.textContent = 'Could not copy the URL. Copy it manually.';
+        }
+    });
+
+    visionCloseButton.addEventListener('click', () => {
+        visionDialog.close();
+    });
+    visionDialog.addEventListener('click', (event) => {
+        if (event.target === visionDialog) {
+            visionDialog.close();
+        }
+    });
+
     socket.on('connect', () => {
         root.querySelector('[data-controller-connection]').classList.add('is-online');
         root.querySelector('[data-controller-connection-label]').textContent = 'Display system connected';
@@ -2994,6 +3121,7 @@ export function mountController() {
         assignmentModeSelect.disabled = false;
         screenCountSelect.disabled = false;
         addDeviceButton.disabled = false;
+        visionConnectButton.disabled = false;
         playbackVolume.disabled = false;
         playbackMuteButton.disabled = false;
         renderAudioControls();
@@ -3029,6 +3157,7 @@ export function mountController() {
         assignmentModeSelect.disabled = true;
         screenCountSelect.disabled = true;
         addDeviceButton.disabled = true;
+        visionConnectButton.disabled = true;
         playbackVolume.disabled = true;
         playbackMuteButton.disabled = true;
         publishButton.disabled = true;
@@ -3060,6 +3189,22 @@ export function mountController() {
     });
     socket.on('devices:update', setDevices);
     socket.on('diagnostics:update', setDiagnostics);
+    socket.on('vision:camera:status', (event) => {
+        if (!event?.connected) {
+            setVisionStatus('Vision camera disconnected.');
+            return;
+        }
+        setVisionStatus(`Vision camera connected (${event.status || 'tracking'}).`);
+    });
+    socket.on('vision:camera:update', (payload) => {
+        const markers = Array.isArray(payload?.markers) ? payload.markers : [];
+        if (markers.length === 0) {
+            setVisionStatus('Vision camera is connected but waiting for markers.');
+            return;
+        }
+        const deviceSummary = markers.map((marker) => `ID ${marker.id}`).join(', ');
+        setVisionStatus(`Markers detected: ${deviceSummary}`);
+    });
     socket.on('pairing:expired', (event) => {
         if (pairingSession?.expiresAt === event?.expiresAt) {
             pairingQr.hidden = true;
