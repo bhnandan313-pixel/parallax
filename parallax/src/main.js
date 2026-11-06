@@ -11,6 +11,11 @@ import {
     saveDeviceAudioPreferences
 } from './media/audio.js';
 import { isFullscreen, toggleFullscreen } from './media/fullscreen.js';
+import {
+    createArucoMarkerPattern,
+    computeMarkerIdForDevice,
+    detectMarkersFromImageData
+} from './vision/marker-detection.js';
 import './styles/main.css';
 
 if (location.pathname === '/controller' || location.pathname === '/controller/') {
@@ -21,48 +26,36 @@ if (location.pathname === '/controller' || location.pathname === '/controller/')
     startDisplay();
 }
 
-function buildMarkerPattern(markerId, size = 5) {
-    const pattern = Array.from({ length: size }, () => Array(size).fill(0));
-    for (let row = 0; row < size; row += 1) {
-        for (let column = 0; column < size; column += 1) {
-            if (row === 0 || row === size - 1 || column === 0 || column === size - 1) {
-                pattern[row][column] = 1;
-            }
-        }
-    }
-    const value = Math.abs(Number(markerId) || 1) % (size * size - (size * 2 - 2) * 2);
-    let bit = 0;
-    for (let row = 1; row < size - 1; row += 1) {
-        for (let column = 1; column < size - 1; column += 1) {
-            const cellIndex = (row - 1) * (size - 2) + (column - 1);
-            if (cellIndex < value) {
-                pattern[row][column] = 1;
-            }
-            bit += 1;
-        }
-    }
-    return pattern;
-}
-
 function createMarkerOverlay(deviceId) {
-    const markerId = Math.abs([...deviceId].reduce((sum, char) => sum + char.charCodeAt(0), 0)) % 1000;
-    const pattern = buildMarkerPattern(markerId);
+    const markerId = computeMarkerIdForDevice(deviceId);
+    const pattern = createArucoMarkerPattern(markerId);
     const overlay = document.createElement('div');
     overlay.className = 'parallax-vision-marker';
     overlay.setAttribute('aria-label', `Device marker ${markerId}`);
-    const grid = document.createElement('div');
-    grid.className = 'parallax-vision-marker-grid';
-    for (const row of pattern) {
-        for (const cell of row) {
-            const cellNode = document.createElement('span');
-            cellNode.className = `parallax-vision-marker-cell ${cell ? 'is-filled' : 'is-empty'}`;
-            grid.appendChild(cellNode);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'parallax-vision-marker-grid';
+    const moduleSize = 56;
+    const quietZoneModules = 1;
+    canvas.width = (pattern.length + quietZoneModules * 2) * moduleSize;
+    canvas.height = (pattern.length + quietZoneModules * 2) * moduleSize;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    for (let row = 0; row < pattern.length; row += 1) {
+        for (let column = 0; column < pattern[row].length; column += 1) {
+            context.fillStyle = pattern[row][column] ? '#fff' : '#000';
+            context.fillRect(
+                (column + quietZoneModules) * moduleSize,
+                (row + quietZoneModules) * moduleSize,
+                moduleSize,
+                moduleSize
+            );
         }
     }
     const label = document.createElement('span');
     label.className = 'parallax-vision-marker-label';
     label.textContent = `ID ${markerId}`;
-    overlay.append(grid, label);
+    overlay.append(canvas, label);
     return overlay;
 }
 
@@ -80,7 +73,11 @@ function startVisionCamera() {
         mediaStream: null,
         frames: 0,
         lastMarkerReportAt: 0,
-        markerStatus: 'Waiting for markers'
+        tracking: null,
+        markerStatus: 'Waiting for markers',
+        processedFrames: 0,
+        detectionCanvas: null,
+        lastError: ''
     };
 
     app.innerHTML = `
@@ -92,6 +89,7 @@ function startVisionCamera() {
                 </div>
                 <div class="vision-camera-preview-wrap">
                     <video class="vision-camera-preview" autoplay playsinline muted></video>
+                    <canvas class="vision-camera-marker-overlay" data-vision-marker-overlay></canvas>
                     <div class="vision-camera-overlay" data-vision-status>Waiting for camera access</div>
                 </div>
                 <div class="vision-camera-controls">
@@ -104,6 +102,11 @@ function startVisionCamera() {
                     <p>Status: <strong data-vision-status-label>Waiting on permission</strong></p>
                     <p>Detected markers: <strong data-vision-detected>0</strong></p>
                     <p>Last update: <strong data-vision-updated>—</strong></p>
+                    <p>Camera: <strong data-vision-camera-status>Not started</strong></p>
+                    <p>Detection loop: <strong data-vision-loop-status>Stopped</strong></p>
+                    <p>Frames processed: <strong data-vision-frame-count>0</strong></p>
+                    <p>Last marker ID: <strong data-vision-marker-id>None</strong></p>
+                    <p>Detection error: <strong data-vision-error>None</strong></p>
                 </div>
             </section>
         </main>
@@ -115,6 +118,12 @@ function startVisionCamera() {
     const sessionNode = app.querySelector('[data-vision-session]');
     const detectedNode = app.querySelector('[data-vision-detected]');
     const updatedNode = app.querySelector('[data-vision-updated]');
+    const cameraStatusNode = app.querySelector('[data-vision-camera-status]');
+    const loopStatusNode = app.querySelector('[data-vision-loop-status]');
+    const frameCountNode = app.querySelector('[data-vision-frame-count]');
+    const markerIdNode = app.querySelector('[data-vision-marker-id]');
+    const detectionErrorNode = app.querySelector('[data-vision-error]');
+    const markerCanvas = app.querySelector('[data-vision-marker-overlay]');
     const cameraSelect = app.querySelector('[data-camera-source]');
     const connectButton = app.querySelector('[data-camera-connect]');
     const disconnectButton = app.querySelector('[data-camera-disconnect]');
@@ -160,6 +169,12 @@ function startVisionCamera() {
         if (video) {
             video.srcObject = null;
         }
+        if (cameraState.frames) {
+            window.clearInterval(cameraState.frames);
+            cameraState.frames = null;
+        }
+        loopStatusNode.textContent = 'Stopped';
+        cameraStatusNode.textContent = 'Disconnected';
     }
 
     async function connectCamera() {
@@ -183,116 +198,89 @@ function startVisionCamera() {
             video.srcObject = cameraState.mediaStream;
             video.play().catch(() => {});
             setStatus('Live camera preview active.', 'Detecting');
+            cameraStatusNode.textContent = 'Live';
             updateCameraSelection();
+            activateDetectionLoop();
         } catch (error) {
             console.error('Unable to access the camera:', error);
             setStatus('Camera permission was denied or no camera is available.', 'Unavailable');
         }
     }
 
-    function decodeMarkerGrid(grid) {
-        const cells = [];
-        for (let row = 1; row < grid.length - 1; row += 1) {
-            for (let column = 1; column < grid[row].length - 1; column += 1) {
-                cells.push(grid[row][column] < 128 ? 1 : 0);
-            }
-        }
-        let value = 0;
-        for (let index = 0; index < cells.length; index += 1) {
-            value = (value << 1) | cells[index];
-        }
-        return value % 1000;
-    }
-
     function detectMarkersFromFrame() {
-        if (!video || video.readyState < 2 || !cameraState.mediaStream) {
+        if (!video || video.readyState < 2 || !cameraState.mediaStream || cameraState.socket?.connected !== true) {
             return;
         }
-        const width = 220;
+        const width = 320;
         const height = Math.max(160, Math.round((video.videoHeight / Math.max(video.videoWidth, 1)) * width));
-        const canvas = document.createElement('canvas');
+        const canvas = cameraState.detectionCanvas ?? document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
+        cameraState.detectionCanvas = canvas;
         const context = canvas.getContext('2d');
         context.drawImage(video, 0, 0, width, height);
-        const { data } = context.getImageData(0, 0, width, height);
-        let minX = width;
-        let minY = height;
-        let maxX = 0;
-        let maxY = 0;
-        let darkPixels = 0;
-        for (let index = 0; index < data.length; index += 4) {
-            const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-            if (brightness < 110) {
-                const x = (index / 4) % width;
-                const y = Math.floor((index / 4) / width);
-                darkPixels += 1;
-                minX = Math.min(minX, x);
-                minY = Math.min(minY, y);
-                maxX = Math.max(maxX, x);
-                maxY = Math.max(maxY, y);
-            }
-        }
-        if (darkPixels < 400) {
-            return;
-        }
-        const regionWidth = maxX - minX + 1;
-        const regionHeight = maxY - minY + 1;
-        if (regionWidth < 30 || regionHeight < 30 || Math.abs(regionWidth - regionHeight) > regionWidth * 0.5) {
-            return;
-        }
-        const left = Math.max(0, minX - 4);
-        const top = Math.max(0, minY - 4);
-        const right = Math.min(width, maxX + 5);
-        const bottom = Math.min(height, maxY + 5);
-        const grid = Array.from({ length: 5 }, (_, rowIndex) => {
-            const row = [];
-            for (let columnIndex = 0; columnIndex < 5; columnIndex += 1) {
-                const cellX0 = left + ((right - left) * columnIndex) / 5;
-                const cellY0 = top + ((bottom - top) * rowIndex) / 5;
-                const cellX1 = left + ((right - left) * (columnIndex + 1)) / 5;
-                const cellY1 = top + ((bottom - top) * (rowIndex + 1)) / 5;
-                let brightness = 255;
-                let samples = 0;
-                for (let pixelY = Math.floor(cellY0); pixelY < cellY1; pixelY += 1) {
-                    for (let pixelX = Math.floor(cellX0); pixelX < cellX1; pixelX += 1) {
-                        const dataIndex = ((pixelY * width) + pixelX) * 4;
-                        if (dataIndex + 2 >= data.length) {
-                            continue;
-                        }
-                        brightness += ((data[dataIndex] + data[dataIndex + 1] + data[dataIndex + 2]) / 3);
-                        samples += 1;
-                    }
+        let markers = [];
+        try {
+            markers = detectMarkersFromImageData(context.getImageData(0, 0, width, height), {
+                minConfidence: 0.2,
+                onError: (error) => {
+                    cameraState.lastError = error.message;
+                    detectionErrorNode.textContent = error.message;
                 }
-                brightness = samples ? brightness / (samples + 1) : 255;
-                row.push(brightness);
-            }
-            return row;
-        });
-        const markerId = decodeMarkerGrid(grid);
-        if (!Number.isFinite(markerId) || markerId === 0) {
-            return;
+            });
+            cameraState.processedFrames += 1;
+            frameCountNode.textContent = String(cameraState.processedFrames);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            cameraState.lastError = message;
+            detectionErrorNode.textContent = message;
         }
-
-        const centerX = ((minX + maxX) / 2) / width;
-        const centerY = ((minY + maxY) / 2) / height;
-        const rotation = Math.atan2(maxY - minY, maxX - minX);
+        markerCanvas.width = markerCanvas.clientWidth;
+        markerCanvas.height = markerCanvas.clientHeight;
+        const overlayContext = markerCanvas.getContext('2d');
+        overlayContext.clearRect(0, 0, markerCanvas.width, markerCanvas.height);
+        overlayContext.strokeStyle = '#22c55e';
+        overlayContext.lineWidth = 3;
+        const scaleX = markerCanvas.width / width;
+        const scaleY = markerCanvas.height / height;
+        for (const marker of markers) {
+            overlayContext.beginPath();
+            marker.corners.forEach((corner, index) => {
+                const x = corner.x * scaleX;
+                const y = corner.y * scaleY;
+                if (index === 0) {
+                    overlayContext.moveTo(x, y);
+                } else {
+                    overlayContext.lineTo(x, y);
+                }
+            });
+            overlayContext.closePath();
+            overlayContext.stroke();
+        }
+        detectedNode.textContent = String(markers.length);
+        markerIdNode.textContent = markers.length
+            ? markers.map((marker) => String(marker.id)).join(', ')
+            : 'None';
         const payload = {
-            markers: [{
-                id: markerId,
-                x: Number(centerX.toFixed(4)),
-                y: Number(centerY.toFixed(4)),
-                rotation: Number(rotation.toFixed(4)),
-                confidence: 0.9,
+            markers: markers.map((marker) => ({
+                id: marker.id,
+                x: marker.normalizedCenter.x,
+                y: marker.normalizedCenter.y,
+                normalizedCenter: marker.normalizedCenter,
+                corners: marker.corners.map((corner) => ({
+                    x: corner.x / width,
+                    y: corner.y / height
+                })),
+                rotation: marker.rotation,
+                confidence: marker.confidence,
                 visible: true,
                 timestamp: Date.now(),
-                deviceId: `marker-${markerId}`
-            }]
+                deviceId: null
+            }))
         };
         if (cameraState.socket && cameraState.socket.connected && Date.now() - cameraState.lastMarkerReportAt > 250) {
             cameraState.lastMarkerReportAt = Date.now();
             cameraState.socket.emit('vision:camera:report', payload);
-            detectedNode.textContent = String(markerId);
             updatedNode.textContent = new Date().toLocaleTimeString();
         }
     }
@@ -307,6 +295,7 @@ function startVisionCamera() {
         cameraState.frames = window.setInterval(() => {
             detectMarkersFromFrame();
         }, 250);
+        loopStatusNode.textContent = 'Running';
     }
 
     if (token) {
@@ -385,6 +374,8 @@ function startDisplay() {
     let identifyOverlay = null;
     let identifyTimer = null;
     let playbackDriftTimer = null;
+    let markerOverlay = null;
+    let visionMarkerMode = false;
     let phoneControls = null;
     let fullscreenButton = null;
     let muteButton = null;
@@ -619,6 +610,7 @@ function startDisplay() {
             showPhoneControls();
             display.addEventListener('pointerdown', showPhoneControls, { passive: true });
             display.addEventListener('touchstart', showPhoneControls, { passive: true });
+            syncVisionMarkerOverlay();
         } else {
             renderer.setScreenCount(totalScreens);
             renderer.setScreen(screen);
@@ -654,6 +646,16 @@ function startDisplay() {
         app.replaceChildren(statusPanel);
     }
 
+    function syncVisionMarkerOverlay() {
+        markerOverlay?.remove();
+        markerOverlay = null;
+        if (!visionMarkerMode || !display) {
+            return;
+        }
+        markerOverlay = createMarkerOverlay(deviceId);
+        display.prepend(markerOverlay);
+    }
+
     socket.on('connect', () => {
         showStatus('Connected');
         if (pairingPending && pairingToken) {
@@ -686,6 +688,10 @@ function startDisplay() {
     socket.on('device:assigned', handleAssignment);
     socket.on('device:assignment-update', handleAssignment);
     socket.on('device:unassigned', handleUnassignment);
+    socket.on('vision:marker-mode', (request) => {
+        visionMarkerMode = request?.enabled === true;
+        syncVisionMarkerOverlay();
+    });
     socket.on('device:identify', (request) => {
         if (!assignedScreen || request?.screen !== assignedScreen) {
             return;

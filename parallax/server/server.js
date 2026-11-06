@@ -31,6 +31,12 @@ import {
     validateSchedule,
     writeMediaManifest
 } from './media-manifest.js';
+import {
+    associateMarkersWithDevices,
+    createVisionTrackerState,
+    createUniqueMarkerAssignments,
+    updateVisionTracker
+} from '../src/vision/marker-detection.js';
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -983,6 +989,7 @@ export function createParallaxServer({
     function getDeviceSnapshot() {
         return [...devices.values()].map(({ id, screen, socketId }) => ({
             id,
+            name: deviceNames[id] || null,
             screen,
             connected: socketId !== null,
             enabled: screen === null ? false : displayLayout.screens[screen]?.enabled !== false,
@@ -1679,7 +1686,8 @@ export function createParallaxServer({
                 token,
                 expiresAt,
                 createdAt: Date.now(),
-                status: 'waiting'
+                status: 'waiting',
+                tracker: createVisionTrackerState()
             });
             setVisionMarkerMode(true);
             respond({
@@ -1756,11 +1764,52 @@ export function createParallaxServer({
                     && Number.isFinite(marker.confidence)
                     && marker.confidence >= 0
                     && marker.confidence <= 1);
+            const registeredDevices = [...devices.values()].map((device) => ({
+                id: device.id,
+                name: deviceNames[device.id] || device.id
+            }));
+            const uniqueAssignments = createUniqueMarkerAssignments(
+                registeredDevices.map((device) => device.id)
+            );
+            const collidingMarkerIds = new Set(
+                uniqueAssignments.duplicateDeviceIds.map((collision) => collision.markerId)
+            );
+            const associationDevices = registeredDevices.filter((device) =>
+                uniqueAssignments.assignments.some((assignment) =>
+                    assignment.deviceId === device.id
+                    && !collidingMarkerIds.has(assignment.markerId)));
+            const associated = associateMarkersWithDevices(validMarkers, associationDevices);
+            const tracked = updateVisionTracker(session.tracker, associated.map((marker) => ({
+                ...marker,
+                normalizedCenter: {
+                    x: Number(marker.normalizedCenter?.x ?? marker.x),
+                    y: Number(marker.normalizedCenter?.y ?? marker.y)
+                }
+            })));
+            const observations = tracked.map((marker) => ({
+                ...marker,
+                relativeX: marker.x,
+                relativeY: marker.y,
+                status: 'tracked',
+                trackingState: 'tracked',
+                calibrated: false
+            }));
+            for (const marker of session.tracker.devices.values()) {
+                if (marker.status === 'lost'
+                    && !observations.some((observation) => observation.deviceId === marker.deviceId)) {
+                    observations.push({
+                        ...marker,
+                        relativeX: marker.x,
+                        relativeY: marker.y,
+                        trackingState: 'lost'
+                    });
+                }
+            }
             const payload = {
                 token,
                 connected: true,
-                status: validMarkers.length > 0 ? 'tracking' : 'waiting',
-                markers: validMarkers,
+                status: observations.length > 0 ? 'tracking' : 'waiting',
+                markers: observations,
                 timestamp: Date.now()
             };
             io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:update', payload);

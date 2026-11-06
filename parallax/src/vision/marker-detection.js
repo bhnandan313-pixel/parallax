@@ -3,6 +3,47 @@ import jsAruco from 'js-aruco';
 const { AR } = jsAruco;
 const detector = AR?.Detector ? new AR.Detector() : null;
 
+export const ARUCO_DICTIONARY = 'ARUCO_ORIGINAL_5X5';
+export const ARUCO_MARKER_ID_MIN = 0;
+export const ARUCO_MARKER_ID_MAX = 1023;
+
+const ARUCO_ROWS_BY_BITS = new Map([
+    ['00', [1, 0, 0, 0, 0]],
+    ['01', [1, 0, 1, 1, 1]],
+    ['10', [0, 1, 0, 0, 1]],
+    ['11', [0, 1, 1, 1, 0]]
+]);
+
+export function isSupportedArucoMarkerId(markerId) {
+    const id = Number(markerId);
+    return Number.isInteger(id)
+        && id >= ARUCO_MARKER_ID_MIN
+        && id <= ARUCO_MARKER_ID_MAX;
+}
+
+export function createArucoMarkerPattern(markerId) {
+    if (!isSupportedArucoMarkerId(markerId)) {
+        return null;
+    }
+
+    const inner = Array.from({ length: 5 }, () => Array(5).fill(0));
+    for (let row = 0; row < 5; row += 1) {
+        const pairIndex = 9 - row * 2;
+        const key = `${(markerId >> pairIndex) & 1}${(markerId >> (pairIndex - 1)) & 1}`;
+        inner[row] = [...ARUCO_ROWS_BY_BITS.get(key)];
+    }
+
+    return [
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, ...inner[0], 0],
+        [0, ...inner[1], 0],
+        [0, ...inner[2], 0],
+        [0, ...inner[3], 0],
+        [0, ...inner[4], 0],
+        [0, 0, 0, 0, 0, 0, 0]
+    ];
+}
+
 export function createDefaultVisionCalibration() {
     return {
         markerSizeMm: 60,
@@ -168,8 +209,10 @@ export function detectMarkersFromImageData(imageData, options = {}) {
             }, imageData.width, imageData.height))
             .filter((marker) => marker && marker.confidence >= minConfidence)
             .sort((left, right) => right.confidence - left.confidence);
-    } catch {
-        return [];
+    } catch (error) {
+        const normalizedError = error instanceof Error ? error : new Error(String(error));
+        options.onError?.(normalizedError);
+        throw normalizedError;
     }
 }
 
@@ -255,4 +298,111 @@ export function associateMarkersWithDevices(markers, registeredDevices) {
             seen.add(entry.deviceId);
             return true;
         });
+}
+
+export function createUniqueMarkerAssignments(deviceIds) {
+    const assignments = [];
+    const usedMarkerIds = new Map();
+    const duplicateDeviceIds = [];
+    for (const deviceId of Array.isArray(deviceIds) ? deviceIds : []) {
+        if (typeof deviceId !== 'string' || !deviceId.trim()) {
+            continue;
+        }
+        const markerId = computeMarkerIdForDevice(deviceId);
+        const existing = usedMarkerIds.get(markerId);
+        if (existing && existing !== deviceId) {
+            duplicateDeviceIds.push({ markerId, deviceIds: [existing, deviceId] });
+            continue;
+        }
+        usedMarkerIds.set(markerId, deviceId);
+        assignments.push({ deviceId, markerId });
+    }
+    return { assignments, duplicateDeviceIds };
+}
+
+export function applyVisionPerspective(point, calibration = createDefaultVisionCalibration()) {
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+    }
+    const scale = calibration?.perspective ?? 1;
+    return {
+        x: Number((x * scale).toFixed(6)),
+        y: Number((y * scale).toFixed(6)),
+        calibrated: Boolean(calibration?.calibratedAt)
+    };
+}
+
+export function createVisionTrackerState() {
+    return { devices: new Map(), timeoutMs: 1500 };
+}
+
+export function updateVisionTracker(state, observations, timestamp = Date.now(), options = {}) {
+    if (!state?.devices) {
+        return [];
+    }
+    const alpha = Math.min(0.95, Math.max(0.05, Number(options.alpha ?? 0.35)));
+    const timeoutMs = Math.max(250, Number(options.timeoutMs ?? state.timeoutMs ?? 1500));
+    const maxJump = Math.max(0.01, Number(options.maxJump ?? 0.18));
+    const accepted = [];
+    const seen = new Set();
+
+    for (const observation of Array.isArray(observations) ? observations : []) {
+        const deviceId = observation?.deviceId;
+        if (!deviceId || seen.has(deviceId)) {
+            continue;
+        }
+        const x = Number(observation.normalizedCenter?.x ?? observation.x);
+        const y = Number(observation.normalizedCenter?.y ?? observation.y);
+        const rotation = Number(observation.rotation ?? 0);
+        const confidence = Number(observation.confidence ?? 0.5);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(rotation)) {
+            continue;
+        }
+        const previous = state.devices.get(deviceId);
+        const jump = previous ? Math.hypot(x - previous.x, y - previous.y) : 0;
+        if (previous?.status !== 'lost' && previous && jump > maxJump && confidence < 0.75) {
+            continue;
+        }
+
+        const smoothedX = previous ? previous.x + alpha * (x - previous.x) : x;
+        const smoothedY = previous ? previous.y + alpha * (y - previous.y) : y;
+        let angleDelta = rotation - (previous?.rotation ?? rotation);
+        while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
+        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
+        const smoothedRotation = previous
+            ? previous.rotation + alpha * angleDelta
+            : rotation;
+        const item = {
+            ...observation,
+            deviceId,
+            x: Number(smoothedX.toFixed(4)),
+            y: Number(smoothedY.toFixed(4)),
+            normalizedCenter: { x: Number(smoothedX.toFixed(4)), y: Number(smoothedY.toFixed(4)) },
+            rotation: Number(smoothedRotation.toFixed(4)),
+            confidence: Number(Math.max(0, Math.min(1, confidence)).toFixed(4)),
+            status: 'tracked',
+            lastDetectedAt: timestamp
+        };
+        state.devices.set(deviceId, item);
+        seen.add(deviceId);
+        accepted.push(item);
+    }
+
+    for (const [deviceId, previous] of state.devices) {
+        if (!seen.has(deviceId) && timestamp - previous.lastDetectedAt >= timeoutMs && previous.status !== 'lost') {
+            state.devices.set(deviceId, {
+                ...previous,
+                status: 'lost'
+            });
+        }
+    }
+    return accepted;
+}
+
+export function resetVisionTrackerDevice(state, deviceId) {
+    if (state?.devices instanceof Map && deviceId) {
+        state.devices.delete(deviceId);
+    }
 }

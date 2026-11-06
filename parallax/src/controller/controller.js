@@ -102,6 +102,13 @@ export function mountController() {
                             Connect Vision Camera
                         </button>
                         <p class="network-note" data-vision-status>Vision camera not connected.</p>
+                        <div class="vision-spatial-panel">
+                            <h3>Spatial observations</h3>
+                            <div class="vision-spatial-preview" data-vision-spatial-preview>
+                                <p class="dashboard-empty-state">No tracked markers.</p>
+                            </div>
+                            <div class="vision-observation-list" data-vision-observations></div>
+                        </div>
                         <div class="screen-config-controls">
                             <label>Screen count
                                 <select data-screen-count disabled>
@@ -556,6 +563,8 @@ export function mountController() {
     const screenConfigSaveButton = root.querySelector('[data-screen-config-save]');
     const visionConnectButton = root.querySelector('[data-vision-connect]');
     const visionStatusNode = root.querySelector('[data-vision-status]');
+    const visionObservations = root.querySelector('[data-vision-observations]');
+    const visionSpatialPreview = root.querySelector('[data-vision-spatial-preview]');
     const alignmentGrid = root.querySelector('[data-alignment-grid]');
     const screenList = root.querySelector('[data-screen-list]');
     const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
@@ -668,7 +677,8 @@ export function mountController() {
             const assignmentOptions = [
                 `<option value="" ${device ? '' : 'selected'}>Unassigned</option>`,
                 ...registeredDevices.map((entry) => `
-                    <option value="${escapeHtml(entry.id)}" ${device?.id === entry.id ? 'selected' : ''}>
+                    <option value="${escapeHtml(entry.id)}" ${device?.id === entry.id ? 'selected' : ''}
+                        ${registeredDevices.some((candidate) => candidate.id !== entry.id && candidate.screen === screen) ? 'disabled' : ''}>
                         ${escapeHtml(entry.id)}${entry.connected ? '' : ' · offline'}
                     </option>
                 `)
@@ -754,14 +764,19 @@ export function mountController() {
             ? registeredDevices.map((device) => {
                 const report = diagnostics?.devices?.find((entry) => entry.deviceId === device.id);
                 const status = device.enabled === false ? 'Disabled' : device.connected ? 'Online' : 'Offline';
+                const occupantByScreen = new Map(
+                    registeredDevices
+                        .filter((entry) => Number.isInteger(entry.screen))
+                        .map((entry) => [entry.screen, entry.id])
+                );
                 return `
                     <article class="dashboard-device-card ${device.enabled === false ? 'is-disabled' : device.connected ? 'is-online' : 'is-offline'}"
                         data-device-card="${escapeHtml(device.id)}" draggable="true">
                         <div class="dashboard-device-card-heading">
-                            <strong>${escapeHtml(device.id)}</strong>
+                            <strong>${escapeHtml(device.name || device.id)}</strong>
                             <span class="dashboard-status-pill"><i></i>${status}</span>
                         </div>
-                        <p>Name: Not reported</p>
+                        <p>Device ID: ${escapeHtml(device.id)}</p>
                         <p>Assigned screen: ${Number.isInteger(device.screen) ? `Screen ${device.screen}${device.enabled === false ? ' · disabled' : ''}` : 'Unassigned'}</p>
                         <p>Last activity: ${formatTimestamp(report?.lastActivity)}</p>
                         <p>Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'}</p>
@@ -778,7 +793,9 @@ export function mountController() {
                                 <option value="" ${device.screen === null ? 'selected' : ''}>Unassigned</option>
                                 ${Array.from({ length: totalScreens }, (_, index) => {
                                     const screen = index + 1;
-                                    return `<option value="${screen}" ${device.screen === screen ? 'selected' : ''}>Screen ${screen}</option>`;
+                                    const occupant = occupantByScreen.get(screen);
+                                    const occupied = occupant && occupant !== device.id;
+                                    return `<option value="${screen}" ${device.screen === screen ? 'selected' : ''} ${occupied ? 'disabled' : ''}>Screen ${screen}${occupied ? ' · assigned' : ''}</option>`;
                                 }).join('')}
                             </select>
                         </label>
@@ -1188,13 +1205,16 @@ export function mountController() {
             return;
         }
         const selectedAddress = pairingInterfaceSelect.value;
-        if (!selectedAddress) {
+        if (window.location.protocol !== 'https:' && !selectedAddress) {
             setPairingStatus('No usable LAN address is available. Connect to Wi-Fi and refresh.', true);
             return;
         }
 
         const url = new URL('/', window.location.origin);
-        url.hostname = selectedAddress;
+        if (window.location.protocol !== 'https:' && selectedAddress) {
+            url.hostname = selectedAddress;
+            url.port = '5173';
+        }
         url.searchParams.set('pair', pairingSession.token);
         pairingUrlInput.value = url.toString();
         pairingPlaceholder.textContent = 'Generating QR code...';
@@ -2268,7 +2288,7 @@ export function mountController() {
         deviceAssignmentList.innerHTML = registeredDevices.length
             ? registeredDevices.map((device) => `
                 <label class="device-assignment-row">
-                    <span><strong>${escapeHtml(device.id)}</strong><small>${device.connected ? 'Connected' : 'Disconnected'}</small></span>
+                    <span><strong>${escapeHtml(device.name || device.id)}</strong><small>${device.connected ? 'Connected' : 'Disconnected'}</small><small>${escapeHtml(device.id)}</small></span>
                     <select data-device-assignment="${escapeHtml(device.id)}" ${!socket.connected ? 'disabled' : ''}>
                         <option value="" ${device.screen === null ? 'selected' : ''}>Unassigned</option>
                         ${Array.from({ length: totalScreens }, (_, index) => {
@@ -2337,6 +2357,39 @@ export function mountController() {
                 ? 'Master Audio Mode updated.'
                 : 'All Devices Audio Mode updated.');
         });
+    }
+
+    function renderVisionObservations(observations) {
+        if (!visionObservations || !visionSpatialPreview) {
+            return;
+        }
+        visionObservations.replaceChildren();
+        visionSpatialPreview.replaceChildren();
+        for (const observation of observations) {
+            const registered = registeredDevices.find((device) => device.id === observation.deviceId);
+            const name = registered?.name || observation.deviceName || observation.deviceId || 'Unknown device';
+            const row = document.createElement('div');
+            row.className = 'vision-observation';
+            row.innerHTML = `
+                <strong>${escapeHtml(name)}</strong>
+                <span>${escapeHtml(observation.deviceId || 'Unknown ID')}</span>
+                <span>Marker ${escapeHtml(String(observation.id))}</span>
+                <span>Relative ${Number(observation.relativeX ?? observation.x ?? 0).toFixed(3)}, ${Number(observation.relativeY ?? observation.y ?? 0).toFixed(3)}</span>
+                <span>Rotation ${(Number(observation.rotation ?? 0) * 180 / Math.PI).toFixed(1)}°</span>
+                <span>${escapeHtml(observation.trackingState || observation.status || 'tracked')} · ${Math.round(Number(observation.confidence ?? 0) * 100)}%</span>
+            `;
+            visionObservations.append(row);
+
+            const dot = document.createElement('span');
+            dot.className = `vision-spatial-point is-${observation.trackingState === 'lost' ? 'lost' : 'tracked'}`;
+            dot.style.left = `${Math.max(2, Math.min(98, Number(observation.relativeX ?? observation.x ?? 0) * 100))}%`;
+            dot.style.top = `${Math.max(2, Math.min(98, Number(observation.relativeY ?? observation.y ?? 0) * 100))}%`;
+            dot.title = `${name} · marker ${observation.id}`;
+            visionSpatialPreview.append(dot);
+        }
+        if (observations.length === 0) {
+            visionObservations.innerHTML = '<p class="dashboard-empty-state">No tracked markers.</p>';
+        }
     }
 
     function escapeHtml(value) {
@@ -3038,12 +3091,44 @@ export function mountController() {
     }
 
     function buildVisionCameraUrl(token, interfaces = []) {
-        const wifiAddress = '10.240.248.206';
-        const preferredOrigin = new URL(window.location.origin);
-        preferredOrigin.hostname = wifiAddress;
-        preferredOrigin.port = window.location.port || preferredOrigin.port;
+        const browserOrigin = window.location?.origin;
+        const isLoopbackHostname = (hostname) => ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
 
-        const cameraUrl = new URL('/vision', preferredOrigin.toString());
+        const fallbackOrigins = [];
+        if (browserOrigin) {
+            try {
+                const browserUrl = new URL(browserOrigin);
+                const isReachableOrigin = !isLoopbackHostname(browserUrl.hostname)
+                    && (browserUrl.protocol === 'https:'
+                        || !browserUrl.port
+                        || /^517\d+$/.test(browserUrl.port)
+                        || /^417\d+$/.test(browserUrl.port));
+                if (isReachableOrigin) {
+                    fallbackOrigins.push(browserOrigin);
+                }
+            } catch {
+                // Ignore malformed origins.
+            }
+        }
+
+        for (const entry of interfaces) {
+            if (entry && typeof entry.address === 'string' && entry.address.trim()) {
+                try {
+                    const origin = new URL(browserOrigin || 'http://localhost:5173');
+                    origin.hostname = entry.address;
+                    origin.port = window.location.port || origin.port;
+                    const candidate = origin.toString();
+                    if (!fallbackOrigins.includes(candidate)) {
+                        fallbackOrigins.push(candidate);
+                    }
+                } catch {
+                    // Ignore invalid interface addresses.
+                }
+            }
+        }
+
+        const selectedOrigin = fallbackOrigins[0] ?? 'http://localhost:5173';
+        const cameraUrl = new URL('/vision', selectedOrigin);
         cameraUrl.searchParams.set('vision', token);
         return cameraUrl;
     }
@@ -3199,10 +3284,13 @@ export function mountController() {
     socket.on('vision:camera:update', (payload) => {
         const markers = Array.isArray(payload?.markers) ? payload.markers : [];
         if (markers.length === 0) {
+            renderVisionObservations([]);
             setVisionStatus('Vision camera is connected but waiting for markers.');
             return;
         }
-        const deviceSummary = markers.map((marker) => `ID ${marker.id}`).join(', ');
+        renderVisionObservations(markers);
+        const deviceSummary = markers.map((marker) =>
+            marker.deviceName || marker.deviceId || `marker ${marker.id}`).join(', ');
         setVisionStatus(`Markers detected: ${deviceSummary}`);
     });
     socket.on('pairing:expired', (event) => {

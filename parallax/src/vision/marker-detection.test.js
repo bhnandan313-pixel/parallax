@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import jsAruco from 'js-aruco';
 import test from 'node:test';
 import {
     associateMarkerWithDevice,
     associateMarkersWithDevices,
     calculateRelativeArrangement,
     computeMarkerIdForDevice,
+    createArucoMarkerPattern,
     createDefaultVisionCalibration,
     detectMarkersFromImageData,
     normalizeMarkerObservation,
@@ -12,6 +14,47 @@ import {
     validateMarkerObservation,
     validateVisionCalibration
 } from './marker-detection.js';
+
+const { AR } = jsAruco;
+
+function createSyntheticMarkerImage(markerDefinitions, width = 640, height = 480, moduleSize = 20) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+        data[index * 4] = 255;
+        data[index * 4 + 1] = 255;
+        data[index * 4 + 2] = 255;
+        data[index * 4 + 3] = 255;
+    }
+
+    for (const marker of markerDefinitions) {
+        const pattern = createArucoMarkerPattern(marker.id);
+        const left = Math.max(0, Math.round(marker.left));
+        const top = Math.max(0, Math.round(marker.top));
+        for (let row = 0; row < pattern.length; row += 1) {
+            for (let column = 0; column < pattern[row].length; column += 1) {
+                const isBlack = pattern[row][column] === 0;
+                if (!isBlack) {
+                    continue;
+                }
+                for (let y = row * moduleSize; y < (row + 1) * moduleSize; y += 1) {
+                    for (let x = column * moduleSize; x < (column + 1) * moduleSize; x += 1) {
+                        const offset = ((top + y) * width + left + x) * 4;
+                        data[offset] = 0;
+                        data[offset + 1] = 0;
+                        data[offset + 2] = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return { width, height, data };
+}
+
+function detectSyntheticMarkers(markerDefinitions) {
+    const detector = new AR.Detector();
+    return detector.detect(createSyntheticMarkerImage(markerDefinitions));
+}
 
 test('creates a default calibration profile and validates practical marker sizes', () => {
     const calibration = createDefaultVisionCalibration();
@@ -25,6 +68,86 @@ test('computes deterministic IDs for persistent device identities', () => {
     assert.equal(computeMarkerIdForDevice('device-a'), computeMarkerIdForDevice('device-a'));
     assert.notEqual(computeMarkerIdForDevice('device-a'), computeMarkerIdForDevice('device-b'));
     assert.equal(computeMarkerIdForDevice(''), null);
+});
+
+test('round-trips valid js-aruco IDs and decodes multiple synthetic markers', () => {
+    for (const id of [1, 21, 511, 1023]) {
+        const detected = detectSyntheticMarkers([{ id, left: 220, top: 165 }]);
+        assert.equal(detected.length, 1, `marker ${id} should be detected`);
+        assert.equal(detected[0].id, id);
+        assert.equal(detected[0].corners.length, 4);
+    }
+
+    const multiple = detectSyntheticMarkers([
+        { id: 1, left: 30, top: 150 },
+        { id: 21, left: 330, top: 150 }
+    ]);
+    assert.equal(multiple.length, 2);
+    assert.deepEqual(multiple.map((marker) => marker.id).sort((left, right) => left - right), [1, 21]);
+});
+
+test('rotation-normalizes decoded js-aruco marker IDs', () => {
+    const rotatedPattern = createArucoMarkerPattern(21);
+    const turned = Array.from({ length: rotatedPattern.length }, (_, row) =>
+        Array.from({ length: rotatedPattern.length }, (_, column) =>
+            rotatedPattern[rotatedPattern.length - 1 - column][row]));
+    const width = 640;
+    const height = 480;
+    const moduleSize = 20;
+    const image = createSyntheticMarkerImage([{ id: 21, left: 220, top: 165 }], width, height, moduleSize);
+    const markerData = image.data;
+    const left = 220;
+    const top = 165;
+    for (let row = 0; row < turned.length; row += 1) {
+        for (let column = 0; column < turned[row].length; column += 1) {
+            if (turned[row][column] !== 0) {
+                continue;
+            }
+            for (let y = row * moduleSize; y < (row + 1) * moduleSize; y += 1) {
+                for (let x = column * moduleSize; x < (column + 1) * moduleSize; x += 1) {
+                    const offset = ((top + y) * width + left + x) * 4;
+                    markerData[offset] = 255;
+                    markerData[offset + 1] = 255;
+                    markerData[offset + 2] = 255;
+                }
+            }
+        }
+    }
+    const unrotated = createArucoMarkerPattern(21);
+    for (let row = 0; row < unrotated.length; row += 1) {
+        for (let column = 0; column < unrotated[row].length; column += 1) {
+            if (unrotated[row][column] !== 0) {
+                continue;
+            }
+            for (let y = row * moduleSize; y < (row + 1) * moduleSize; y += 1) {
+                for (let x = column * moduleSize; x < (column + 1) * moduleSize; x += 1) {
+                    const offset = ((top + y) * width + left + x) * 4;
+                    markerData[offset] = 255;
+                    markerData[offset + 1] = 255;
+                    markerData[offset + 2] = 255;
+                }
+            }
+        }
+    }
+    for (let row = 0; row < turned.length; row += 1) {
+        for (let column = 0; column < turned[row].length; column += 1) {
+            if (turned[row][column] !== 0) {
+                continue;
+            }
+            for (let y = row * moduleSize; y < (row + 1) * moduleSize; y += 1) {
+                for (let x = column * moduleSize; x < (column + 1) * moduleSize; x += 1) {
+                    const offset = ((top + y) * width + left + x) * 4;
+                    markerData[offset] = 0;
+                    markerData[offset + 1] = 0;
+                    markerData[offset + 2] = 0;
+                }
+            }
+        }
+    }
+
+    const detected = new AR.Detector().detect(image);
+    assert.equal(detected.length, 1);
+    assert.equal(detected[0].id, 21);
 });
 
 test('normalizes and validates marker observations without inventing missing values', () => {

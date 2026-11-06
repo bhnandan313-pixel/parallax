@@ -678,6 +678,52 @@ body.controller-page #app {
     font-size: 10px;
 }
 
+.vision-spatial-panel {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.vision-spatial-preview {
+    position: relative;
+    min-height: 180px;
+    overflow: hidden;
+    border: 1px solid #292631;
+    border-radius: 9px;
+    background:
+        linear-gradient(#292631 1px, transparent 1px),
+        linear-gradient(90deg, #292631 1px, transparent 1px),
+        #111016;
+    background-size: 20px 20px;
+}
+
+.vision-spatial-point {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.vision-spatial-point.is-tracked {
+    background: #4ade80;
+    box-shadow: 0 0 12px rgba(74, 222, 128, 0.9);
+}
+
+.vision-spatial-point.is-lost {
+    background: #f87171;
+}
+
+.vision-observation {
+    display: grid;
+    gap: 2px;
+    padding: 8px;
+    border-bottom: 1px solid #292631;
+    color: #aaa6b2;
+    font-size: 11px;
+}
+
 @media (max-width: 900px) {
     .controller-grid {
         grid-template-columns: minmax(0, 1fr);

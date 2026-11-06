@@ -7,6 +7,7 @@ import { io as createSocket } from 'socket.io-client';
 import sharp from 'sharp';
 import { createParallaxServer } from '../server.js';
 import { createDefaultLayout } from '../../src/display/geometry.js';
+import { computeMarkerIdForDevice } from '../../src/vision/marker-detection.js';
 
 function defaultScreens(count = 12) {
     return Object.fromEntries(Array.from({ length: count }, (_, index) => [
@@ -151,6 +152,8 @@ test('creates and validates temporary vision camera sessions', async () => {
     const clients = [];
 
     try {
+        const display = await registerDevice(server.url, 'vision-display-test');
+        clients.push(display.socket);
         const controller = await connectClient(server.url);
         clients.push(controller);
         controller.emit('controller:register');
@@ -182,19 +185,19 @@ test('creates and validates temporary vision camera sessions', async () => {
             controller.on('vision:camera:update', onUpdate);
             camera.emit('vision:camera:report', {
                 markers: [{
-                    id: 42,
+                    id: computeMarkerIdForDevice('vision-display-test'),
                     x: 0.25,
                     y: 0.5,
                     rotation: 0.1,
                     confidence: 0.9,
                     visible: true,
                     timestamp: Date.now(),
-                    deviceId: 'display-42'
+                    deviceId: 'vision-display-test'
                 }]
             });
         });
         assert.equal(state.status, 'tracking');
-        assert.equal(state.markers[0].id, 42);
+        assert.equal(state.markers[0].id, computeMarkerIdForDevice('vision-display-test'));
 
         const invalid = await new Promise((resolve) => {
             camera.emit('vision:camera:join', { token: 'not-a-real-token' }, resolve);

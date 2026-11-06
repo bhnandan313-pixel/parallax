@@ -52,10 +52,10 @@ test('uses the current browser host for Socket.IO and uploads', () => {
         }
     });
 
-    assert.equal(baseUrl, 'http://10.240.248.206:3001');
+    assert.equal(baseUrl, 'http://10.240.248.206');
     assert.deepEqual(socketArguments, [
         baseUrl,
-        { reconnection: true, timeout: 15000 }
+        { path: '/socket.io', reconnection: true, timeout: 15000 }
     ]);
     assert.equal(socket.connected, false);
 });
