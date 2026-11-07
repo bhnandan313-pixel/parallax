@@ -6,7 +6,8 @@ export default defineConfig({
         port: 5173,
         allowedHosts: [
             'northwest-downloaded-paperback-implement.trycloudflare.com',
-            'ancient-pubs-lions-volunteers.trycloudflare.com'
+            'ancient-pubs-lions-volunteers.trycloudflare.com',
+            'bristol-tribal-culture-airport.trycloudflare.com'
         ],
         proxy: {
             '/api': {

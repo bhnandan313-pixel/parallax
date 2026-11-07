@@ -112,6 +112,71 @@ export function computeMarkerIdForDevice(deviceId) {
     return ((hash >>> 0) % 999) + 1;
 }
 
+export const MIN_PARALLAX_MARKER_ID = 1;
+export const MAX_PARALLAX_MARKER_ID = 999;
+
+export function allocateMarkerId(deviceId, usedMarkerIds) {
+    if (typeof deviceId !== 'string' || !deviceId.trim()) {
+        return null;
+    }
+    const used = usedMarkerIds instanceof Set
+        ? usedMarkerIds
+        : new Set(Array.isArray(usedMarkerIds) ? usedMarkerIds : []);
+    const initialMarkerId = computeMarkerIdForDevice(deviceId);
+    if (!used.has(initialMarkerId)) {
+        return initialMarkerId;
+    }
+    for (let offset = 1; offset < MAX_PARALLAX_MARKER_ID; offset += 1) {
+        const markerId = ((initialMarkerId - 1 + offset) % MAX_PARALLAX_MARKER_ID) + MIN_PARALLAX_MARKER_ID;
+        if (!used.has(markerId)) {
+            return markerId;
+        }
+    }
+    return null;
+}
+
+export function createPersistentMarkerAssignments(deviceIds, existingAssignments = {}) {
+    const normalizedDeviceIds = [...new Set((Array.isArray(deviceIds) ? deviceIds : [])
+        .filter((deviceId) => typeof deviceId === 'string' && deviceId.trim()))];
+    const assignments = {};
+    const usedMarkerIds = new Map();
+
+    for (const deviceId of normalizedDeviceIds) {
+        const existingMarkerId = Number(existingAssignments?.[deviceId]);
+        if (!Number.isInteger(existingMarkerId)
+            || existingMarkerId < MIN_PARALLAX_MARKER_ID
+            || existingMarkerId > MAX_PARALLAX_MARKER_ID
+            || usedMarkerIds.has(existingMarkerId)) {
+            continue;
+        }
+        assignments[deviceId] = existingMarkerId;
+        usedMarkerIds.set(existingMarkerId, deviceId);
+    }
+
+    for (const deviceId of normalizedDeviceIds) {
+        if (Object.prototype.hasOwnProperty.call(assignments, deviceId)) {
+            continue;
+        }
+        const initialMarkerId = computeMarkerIdForDevice(deviceId);
+        const initialOwner = usedMarkerIds.get(initialMarkerId);
+        if (!initialOwner) {
+            assignments[deviceId] = initialMarkerId;
+            usedMarkerIds.set(initialMarkerId, deviceId);
+            continue;
+        }
+        const replacementMarkerId = allocateMarkerId(
+            deviceId,
+            new Set([...usedMarkerIds.keys()])
+        );
+        if (replacementMarkerId === null) {
+            throw new Error('MARKER_ID_CAPACITY_EXHAUSTED');
+        }
+        assignments[deviceId] = replacementMarkerId;
+        usedMarkerIds.set(replacementMarkerId, deviceId);
+    }
+    return assignments;
+}
+
 export function estimateMarkerRotation(corners) {
     if (!Array.isArray(corners) || corners.length < 2) {
         return 0;
@@ -268,7 +333,9 @@ export function associateMarkerWithDevice(marker, registeredDevices) {
     }
     const markerId = Number(marker.id);
     const matchedDevice = registeredDevices.find((device) => {
-        const candidateMarkerId = computeMarkerIdForDevice(device?.id);
+        const candidateMarkerId = Number.isInteger(Number(device?.markerId))
+            ? Number(device.markerId)
+            : computeMarkerIdForDevice(device?.id);
         return Number.isInteger(candidateMarkerId) && candidateMarkerId === markerId;
     });
     if (!matchedDevice) {
@@ -301,22 +368,10 @@ export function associateMarkersWithDevices(markers, registeredDevices) {
 }
 
 export function createUniqueMarkerAssignments(deviceIds) {
-    const assignments = [];
-    const usedMarkerIds = new Map();
+    const assignments = Object.entries(
+        createPersistentMarkerAssignments(deviceIds)
+    ).map(([deviceId, markerId]) => ({ deviceId, markerId }));
     const duplicateDeviceIds = [];
-    for (const deviceId of Array.isArray(deviceIds) ? deviceIds : []) {
-        if (typeof deviceId !== 'string' || !deviceId.trim()) {
-            continue;
-        }
-        const markerId = computeMarkerIdForDevice(deviceId);
-        const existing = usedMarkerIds.get(markerId);
-        if (existing && existing !== deviceId) {
-            duplicateDeviceIds.push({ markerId, deviceIds: [existing, deviceId] });
-            continue;
-        }
-        usedMarkerIds.set(markerId, deviceId);
-        assignments.push({ deviceId, markerId });
-    }
     return { assignments, duplicateDeviceIds };
 }
 

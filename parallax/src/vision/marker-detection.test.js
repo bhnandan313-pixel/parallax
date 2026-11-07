@@ -6,6 +6,7 @@ import {
     associateMarkersWithDevices,
     calculateRelativeArrangement,
     computeMarkerIdForDevice,
+    createPersistentMarkerAssignments,
     createArucoMarkerPattern,
     createDefaultVisionCalibration,
     detectMarkersFromImageData,
@@ -68,6 +69,56 @@ test('computes deterministic IDs for persistent device identities', () => {
     assert.equal(computeMarkerIdForDevice('device-a'), computeMarkerIdForDevice('device-a'));
     assert.notEqual(computeMarkerIdForDevice('device-a'), computeMarkerIdForDevice('device-b'));
     assert.equal(computeMarkerIdForDevice(''), null);
+});
+
+test('resolves hash collisions without changing existing assignments', () => {
+    const collisionDevices = ['x0', 'x672'];
+    const hash = computeMarkerIdForDevice(collisionDevices[0]);
+    const originalHash = hash;
+    const assignments = createPersistentMarkerAssignments(
+        collisionDevices,
+        { [collisionDevices[0]]: hash }
+    );
+    assert.equal(assignments[collisionDevices[0]], originalHash);
+    assert.notEqual(assignments[collisionDevices[1]], originalHash);
+});
+
+test('persists replacements across reconnects and backend restarts', () => {
+    const devices = ['phone-a', 'phone-b', 'phone-c'];
+    const first = createPersistentMarkerAssignments(devices, {});
+    const reconnected = createPersistentMarkerAssignments(devices, first);
+    const restarted = createPersistentMarkerAssignments(devices, reconnected);
+    assert.deepEqual(reconnected, first);
+    assert.deepEqual(restarted, first);
+    assert.equal(new Set(Object.values(restarted)).size, devices.length);
+});
+
+test('does not reuse a replacement marker when the replacement registry is edited invalidly', () => {
+    const devices = ['phone-a', 'phone-b'];
+    const assignments = createPersistentMarkerAssignments(devices, {
+        'phone-a': 1,
+        'phone-b': 1
+    });
+    assert.notEqual(assignments['phone-a'], assignments['phone-b']);
+    assert.equal(assignments['phone-a'], 1);
+});
+
+test('removing a device does not change replacement IDs for remaining devices', () => {
+    const devices = ['x0', 'x672', 'phone-c'];
+    const assignments = createPersistentMarkerAssignments(devices, {});
+    const remaining = createPersistentMarkerAssignments(devices.slice(1), assignments);
+    assert.equal(remaining['x672'], assignments['x672']);
+    assert.equal(remaining['phone-c'], assignments['phone-c']);
+});
+
+test('reports marker ID exhaustion', () => {
+    const existingAssignments = Object.fromEntries(
+        Array.from({ length: 999 }, (_, index) => [`device-${index}`, index + 1])
+    );
+    assert.throws(
+        () => createPersistentMarkerAssignments([...Object.keys(existingAssignments), 'new-device'], existingAssignments),
+        /MARKER_ID_CAPACITY_EXHAUSTED/
+    );
 });
 
 test('round-trips valid js-aruco IDs and decodes multiple synthetic markers', () => {

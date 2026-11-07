@@ -34,7 +34,7 @@ import {
 import {
     associateMarkersWithDevices,
     createVisionTrackerState,
-    createUniqueMarkerAssignments,
+    createPersistentMarkerAssignments,
     updateVisionTracker
 } from '../src/vision/marker-detection.js';
 
@@ -71,6 +71,14 @@ function isLocalHostname(hostname) {
     return isLoopbackHostname(hostname)
         || Object.values(networkInterfaces()).some((addresses) =>
             (addresses ?? []).some((entry) => entry.address === hostname));
+}
+
+function getForwardedHostname(request) {
+    const forwardedHost = request.get('x-forwarded-host');
+    if (typeof forwardedHost === 'string' && forwardedHost.trim()) {
+        return forwardedHost.split(',')[0].trim().split(':')[0];
+    }
+    return request.hostname;
 }
 
 function isAllowedBrowserOrigin(origin, requestHostname) {
@@ -175,6 +183,7 @@ export function createParallaxServer({
     let displayLayout = createDefaultLayout(MIN_SCREEN_COUNT);
     let layoutPresets = [];
     let persistedAssignments = {};
+    let persistedMarkerAssignments = {};
     let deviceNames = {};
     const deviceActivity = new Map();
     let alignmentRevision = 0;
@@ -186,6 +195,7 @@ export function createParallaxServer({
             totalScreens,
             assignmentMode,
             assignments: { ...persistedAssignments },
+            markerAssignments: { ...persistedMarkerAssignments },
             screens: getStoredAlignmentSnapshot(),
             layout: cloneDisplayLayout(displayLayout),
             layoutPresets: layoutPresets.map((preset) => ({
@@ -315,6 +325,20 @@ export function createParallaxServer({
                 shouldRepair = true;
             }
 
+            const storedMarkerAssignments = settings.markerAssignments && typeof settings.markerAssignments === 'object'
+                && !Array.isArray(settings.markerAssignments)
+                ? settings.markerAssignments
+                : {};
+            try {
+                persistedMarkerAssignments = createPersistentMarkerAssignments(
+                    Object.keys(persistedAssignments),
+                    storedMarkerAssignments
+                );
+            } catch (error) {
+                console.error(`Unable to restore marker assignments: ${error.message}`);
+                throw error;
+            }
+
             const storedDeviceNames = settings.deviceNames && typeof settings.deviceNames === 'object'
                 && !Array.isArray(settings.deviceNames)
                 ? settings.deviceNames
@@ -393,6 +417,7 @@ export function createParallaxServer({
                 totalScreens,
                 assignmentMode,
                 assignments: { ...persistedAssignments },
+                markerAssignments: { ...persistedMarkerAssignments },
                 screens: storedScreens,
                 presets: validPresets,
                 layout: cloneDisplayLayout(displayLayout),
@@ -429,6 +454,7 @@ export function createParallaxServer({
         totalScreens = settings.totalScreens ?? MIN_SCREEN_COUNT;
         assignmentMode = settings.assignmentMode ?? 'automatic';
         persistedAssignments = { ...(settings.assignments ?? {}) };
+        persistedMarkerAssignments = { ...(settings.markerAssignments ?? {}) };
         deviceNames = { ...(settings.deviceNames ?? {}) };
         mediaManifest = loadedMediaManifest;
         currentContent = { ...mediaManifest.currentContent };
@@ -915,6 +941,7 @@ export function createParallaxServer({
                     totalScreens = previous.totalScreens;
                     assignmentMode = previous.assignmentMode;
                     persistedAssignments = previous.assignments;
+                    persistedMarkerAssignments = previous.markerAssignments;
                     for (const [id, device] of devices) {
                         if (id in persistedAssignments) {
                             device.screen = persistedAssignments[id];
@@ -990,6 +1017,7 @@ export function createParallaxServer({
         return [...devices.values()].map(({ id, screen, socketId }) => ({
             id,
             name: deviceNames[id] || null,
+            markerId: persistedMarkerAssignments[id] ?? null,
             screen,
             connected: socketId !== null,
             enabled: screen === null ? false : displayLayout.screens[screen]?.enabled !== false,
@@ -1042,6 +1070,7 @@ export function createParallaxServer({
         return {
             deviceId: device.id,
             screen: device.screen,
+            markerId: persistedMarkerAssignments[device.id] ?? null,
             totalScreens,
             layout: cloneDisplayLayout(displayLayout),
             enabled: device.screen === null ? false : displayLayout.screens[device.screen]?.enabled !== false,
@@ -1232,7 +1261,7 @@ export function createParallaxServer({
 
     app.use('/uploads', (req, res, next) => {
         const origin = req.get('origin');
-        if (origin && !isAllowedBrowserOrigin(origin, req.hostname)) {
+        if (origin && !isAllowedBrowserOrigin(origin, getForwardedHostname(req))) {
             res.status(403).json({ error: 'Media origin is not allowed' });
             return;
         }
@@ -1256,7 +1285,7 @@ export function createParallaxServer({
     app.use(['/api/upload', '/api/media/upload'], (req, res, next) => {
         const origin = req.get('origin');
         if (origin) {
-            if (!isAllowedBrowserOrigin(origin, req.hostname)) {
+            if (!isAllowedBrowserOrigin(origin, getForwardedHostname(req))) {
                 res.status(403).json({ error: 'Upload origin is not allowed' });
                 return;
             }
@@ -1766,18 +1795,11 @@ export function createParallaxServer({
                     && marker.confidence <= 1);
             const registeredDevices = [...devices.values()].map((device) => ({
                 id: device.id,
-                name: deviceNames[device.id] || device.id
+                name: deviceNames[device.id] || device.id,
+                markerId: persistedMarkerAssignments[device.id] ?? null
             }));
-            const uniqueAssignments = createUniqueMarkerAssignments(
-                registeredDevices.map((device) => device.id)
-            );
-            const collidingMarkerIds = new Set(
-                uniqueAssignments.duplicateDeviceIds.map((collision) => collision.markerId)
-            );
             const associationDevices = registeredDevices.filter((device) =>
-                uniqueAssignments.assignments.some((assignment) =>
-                    assignment.deviceId === device.id
-                    && !collidingMarkerIds.has(assignment.markerId)));
+                Number.isInteger(device.markerId));
             const associated = associateMarkersWithDevices(validMarkers, associationDevices);
             const tracked = updateVisionTracker(session.tracker, associated.map((marker) => ({
                 ...marker,
@@ -1879,8 +1901,13 @@ export function createParallaxServer({
                                 throw new Error('SCREEN_CAPACITY');
                             }
                         }
+                        const markerAssignments = createPersistentMarkerAssignments(
+                            [...new Set([...Object.keys(persistedAssignments), deviceId])],
+                            persistedMarkerAssignments
+                        );
                         device.screen = screen;
                         persistedAssignments[deviceId] = screen;
+                        persistedMarkerAssignments = markerAssignments;
                     });
                 } catch (error) {
                     devices.delete(deviceId);
@@ -1888,6 +1915,13 @@ export function createParallaxServer({
                         console.warn(`Device registration rejected: screen capacity reached (${deviceId})`);
                         socket.emit('device:rejected', {
                             message: `All ${totalScreens} screens are assigned. Reassign or unassign a device first.`
+                        });
+                        return;
+                    }
+                    if (error.message === 'MARKER_ID_CAPACITY_EXHAUSTED') {
+                        console.warn(`Device registration rejected: marker ID capacity exhausted (${deviceId})`);
+                        socket.emit('device:rejected', {
+                            message: 'No js-aruco marker IDs are available. Remove a registered device before adding another.'
                         });
                         return;
                     }
@@ -3271,6 +3305,7 @@ function createDefaultSettings() {
         totalScreens: MIN_SCREEN_COUNT,
         assignmentMode: 'automatic',
         assignments: {},
+        markerAssignments: {},
         screens: createDefaultAlignmentSettings(MAX_SCREEN_COUNT),
         presets: [],
         layout: createDefaultLayout(MIN_SCREEN_COUNT),

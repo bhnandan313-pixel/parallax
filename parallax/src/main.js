@@ -26,8 +26,10 @@ if (location.pathname === '/controller' || location.pathname === '/controller/')
     startDisplay();
 }
 
-function createMarkerOverlay(deviceId) {
-    const markerId = computeMarkerIdForDevice(deviceId);
+function createMarkerOverlay(deviceId, allocatedMarkerId = null) {
+    const markerId = Number.isInteger(allocatedMarkerId)
+        ? allocatedMarkerId
+        : computeMarkerIdForDevice(deviceId);
     const pattern = createArucoMarkerPattern(markerId);
     const overlay = document.createElement('div');
     overlay.className = 'parallax-vision-marker';
@@ -365,6 +367,7 @@ function startDisplay() {
     const statusHistory = [];
     let display = null;
     let assignedScreen = null;
+    let allocatedMarkerId = null;
     let totalScreens = 2;
     let displayStatus = 'waiting';
     let displayError = null;
@@ -581,6 +584,9 @@ function startDisplay() {
             alignmentByScreen[screen] = { ...assignment.alignment };
         }
         assignedScreen = screen;
+        allocatedMarkerId = Number.isInteger(assignment.markerId)
+            ? assignment.markerId
+            : allocatedMarkerId;
         displayStatus = 'waiting';
         displayError = null;
         showStatus(`Device assigned - Screen ${screen}`);
@@ -652,7 +658,7 @@ function startDisplay() {
         if (!visionMarkerMode || !display) {
             return;
         }
-        markerOverlay = createMarkerOverlay(deviceId);
+        markerOverlay = createMarkerOverlay(deviceId, allocatedMarkerId);
         display.prepend(markerOverlay);
     }
 

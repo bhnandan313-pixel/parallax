@@ -17,6 +17,7 @@ function defaultScreens(count = 12) {
 }
 
 function storedSettings({ calibrationEnabled = false, screens = {}, assignments = {},
+    markerAssignments = {},
     totalScreens = 2, assignmentMode = 'automatic', presets = [],
     layout = defaultLayout(totalScreens), layoutPresets = [] } = {}) {
     return {
@@ -24,6 +25,7 @@ function storedSettings({ calibrationEnabled = false, screens = {}, assignments 
         totalScreens,
         assignmentMode,
         assignments,
+        markerAssignments,
         screens: { ...defaultScreens(), ...screens },
         presets,
         layout,
@@ -45,6 +47,7 @@ function defaultLayout(totalScreens) {
                 orientation: 'auto',
                 enabled: true
             }
+
         ]))
     };
 }
@@ -469,6 +472,8 @@ test('creates default settings and restores calibration and independent alignmen
         clients.push(secondPhone.socket);
         assert.equal(firstPhone.assignment.screen, 1);
         assert.equal(secondPhone.assignment.screen, 2);
+        assert.equal(firstPhone.assignment.markerId, computeMarkerIdForDevice('persisted-phone-one'));
+        assert.equal(secondPhone.assignment.markerId, computeMarkerIdForDevice('persisted-phone-two'));
         assert.deepEqual(await firstPhone.initialCalibration, { enabled: true });
         assert.deepEqual(await secondPhone.initialCalibration, { enabled: true });
         const activeSavedScreens = { 1: screenOne, 2: screenTwo };
@@ -494,6 +499,10 @@ test('creates default settings and restores calibration and independent alignmen
                 assignments: {
                     'persisted-phone-one': 1,
                     'persisted-phone-two': 2
+                },
+                markerAssignments: {
+                    'persisted-phone-one': firstPhone.assignment.markerId,
+                    'persisted-phone-two': secondPhone.assignment.markerId
                 },
                 screens: { 1: resetSettings, 2: screenTwo }
             }));
