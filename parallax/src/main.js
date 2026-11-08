@@ -66,42 +66,56 @@ function startVisionCamera() {
         lastError: '',
         lastSuccessfulDetectionAt: null,
         registeredMarkers: [],
+        matchedMarkers: 0,
         lastDiagnosticsLogAt: 0
     };
 
     app.innerHTML = `
         <main class="vision-camera-shell">
-            <section class="vision-camera-panel">
-                <div class="vision-camera-header">
-                    <p class="eyebrow">MOBILE VISION</p>
-                    <h1>Camera for spatial tracking</h1>
-                </div>
-                <div class="vision-camera-preview-wrap">
+            <section class="vision-camera-panel" aria-label="Parallax Vision">
+                <header class="vision-camera-header">
+                    <a class="vision-brand" href="/" aria-label="Parallax Vision home">
+                        <span class="vision-brand-mark" aria-hidden="true">P</span>
+                        <span>PARALLAX <small>VISION</small></span>
+                    </a>
+                    <div class="vision-session-state" aria-live="polite">
+                        <span class="vision-connection-indicator" data-vision-indicator></span>
+                        <span data-vision-status-label>Waiting for session</span>
+                        <span class="vision-session-id" data-vision-session>Not connected</span>
+                    </div>
+                </header>
+                <div class="vision-camera-preview-wrap" aria-label="Live camera preview">
                     <video class="vision-camera-preview" autoplay playsinline muted></video>
                     <canvas class="vision-camera-marker-overlay" data-vision-marker-overlay></canvas>
                     <div class="vision-camera-overlay" data-vision-status>Waiting for camera access</div>
                 </div>
+                <section class="vision-tracking-summary" aria-live="polite" aria-label="Tracking status">
+                    <div><span>Detected</span><strong data-vision-detected>0</strong></div>
+                    <div><span>Matched devices</span><strong data-vision-matched-count>0</strong></div>
+                    <p data-vision-tracking-status>Waiting for camera</p>
+                </section>
                 <div class="vision-camera-controls">
-                    <select class="vision-camera-source" data-camera-source hidden></select>
-                    <button class="alignment-action" type="button" data-camera-connect>Connect camera</button>
-                    <button class="alignment-action" type="button" data-camera-disconnect>Disconnect</button>
+                    <select class="vision-camera-source" data-camera-source aria-label="Camera source" hidden></select>
+                    <button class="vision-camera-button is-primary" type="button" data-camera-connect>Start camera</button>
+                    <button class="vision-camera-button" type="button" data-camera-reconnect>Reconnect</button>
+                    <button class="vision-camera-button is-subtle" type="button" data-camera-disconnect>Stop camera</button>
                 </div>
-                <div class="vision-camera-metadata">
-                    <p>Session: <strong data-vision-session>Not connected</strong></p>
-                    <p>Status: <strong data-vision-status-label>Waiting on permission</strong></p>
-                    <p>Detected markers: <strong data-vision-detected>0</strong></p>
-                    <p>Last update: <strong data-vision-updated>—</strong></p>
-                    <p>Camera stream: <strong data-vision-camera-status>Not started</strong></p>
-                    <p>Frame dimensions: <strong data-vision-frame-dimensions>—</strong></p>
-                    <p>Detection loop: <strong data-vision-loop-status>Stopped</strong></p>
-                    <p>Frames processed: <strong data-vision-frame-count>0</strong></p>
-                    <p>Detected IDs: <strong data-vision-marker-id>None</strong></p>
-                    <p>Registered IDs: <strong data-vision-registered-ids>Waiting for report</strong></p>
-                    <p>Matched IDs: <strong data-vision-matched-ids>None</strong></p>
-                    <p>Unmatched IDs: <strong data-vision-unmatched-ids>None</strong></p>
-                    <p>Last successful detection: <strong data-vision-last-detection>Never</strong></p>
-                    <p>Detection error: <strong data-vision-error>None</strong></p>
-                </div>
+                <details class="vision-debug-panel">
+                    <summary>Debug</summary>
+                    <div class="vision-camera-metadata">
+                        <p>Last update: <strong data-vision-updated>—</strong></p>
+                        <p>Camera stream: <strong data-vision-camera-status>Not started</strong></p>
+                        <p>Frame dimensions: <strong data-vision-frame-dimensions>—</strong></p>
+                        <p>Detection loop: <strong data-vision-loop-status>Stopped</strong></p>
+                        <p>Frames processed: <strong data-vision-frame-count>0</strong></p>
+                        <p>Detected IDs: <strong data-vision-marker-id>None</strong></p>
+                        <p>Registered IDs: <strong data-vision-registered-ids>Waiting for report</strong></p>
+                        <p>Matched IDs: <strong data-vision-matched-ids>None</strong></p>
+                        <p>Unmatched IDs: <strong data-vision-unmatched-ids>None</strong></p>
+                        <p>Last successful detection: <strong data-vision-last-detection>Never</strong></p>
+                        <p>Detection error: <strong data-vision-error>None</strong></p>
+                    </div>
+                </details>
             </section>
         </main>
     `;
@@ -109,8 +123,11 @@ function startVisionCamera() {
     const video = app.querySelector('.vision-camera-preview');
     const statusNode = app.querySelector('[data-vision-status]');
     const statusLabel = app.querySelector('[data-vision-status-label]');
+    const connectionIndicator = app.querySelector('[data-vision-indicator]');
     const sessionNode = app.querySelector('[data-vision-session]');
     const detectedNode = app.querySelector('[data-vision-detected]');
+    const matchedCountNode = app.querySelector('[data-vision-matched-count]');
+    const trackingStatusNode = app.querySelector('[data-vision-tracking-status]');
     const updatedNode = app.querySelector('[data-vision-updated]');
     const cameraStatusNode = app.querySelector('[data-vision-camera-status]');
     const loopStatusNode = app.querySelector('[data-vision-loop-status]');
@@ -125,12 +142,38 @@ function startVisionCamera() {
     const markerCanvas = app.querySelector('[data-vision-marker-overlay]');
     const cameraSelect = app.querySelector('[data-camera-source]');
     const connectButton = app.querySelector('[data-camera-connect]');
+    const reconnectButton = app.querySelector('[data-camera-reconnect]');
     const disconnectButton = app.querySelector('[data-camera-disconnect]');
 
     function setStatus(message, label) {
         statusNode.textContent = message;
         statusLabel.textContent = label;
         cameraState.markerStatus = label;
+        const status = label.toLowerCase();
+        connectionIndicator.classList.toggle('is-online',
+            status === 'connected' || status === 'detecting');
+        connectionIndicator.classList.toggle('is-warning',
+            status === 'connecting' || status === 'waiting');
+        connectionIndicator.classList.toggle('is-error',
+            status === 'disconnected' || status === 'unavailable'
+                || status === 'unsupported' || status === 'rejected' || status === 'invalid');
+    }
+
+    function updateTrackingStatus(detectedCount, matchedCount = cameraState.matchedMarkers) {
+        matchedCountNode.textContent = String(matchedCount);
+        if (!cameraState.mediaStream) {
+            trackingStatusNode.textContent = 'Camera is off';
+            trackingStatusNode.dataset.state = 'inactive';
+        } else if (detectedCount === 0) {
+            trackingStatusNode.textContent = 'Searching for markers';
+            trackingStatusNode.dataset.state = 'waiting';
+        } else if (matchedCount === 0) {
+            trackingStatusNode.textContent = `${detectedCount} marker${detectedCount === 1 ? '' : 's'} detected · waiting for device match`;
+            trackingStatusNode.dataset.state = 'waiting';
+        } else {
+            trackingStatusNode.textContent = `Tracking ${matchedCount} matched device${matchedCount === 1 ? '' : 's'}`;
+            trackingStatusNode.dataset.state = 'tracking';
+        }
     }
 
     function loadCameraDevices() {
@@ -174,6 +217,7 @@ function startVisionCamera() {
         }
         loopStatusNode.textContent = 'Stopped';
         cameraStatusNode.textContent = 'Disconnected';
+        updateTrackingStatus(0, 0);
     }
 
     async function connectCamera() {
@@ -243,6 +287,7 @@ function startVisionCamera() {
         overlayContext.clearRect(0, 0, markerCanvas.width, markerCanvas.height);
         overlayContext.strokeStyle = '#22c55e';
         overlayContext.lineWidth = 3;
+        overlayContext.font = '600 14px ui-sans-serif, system-ui, sans-serif';
         const scaleX = markerCanvas.width / width;
         const scaleY = markerCanvas.height / height;
         for (const marker of markers) {
@@ -258,8 +303,17 @@ function startVisionCamera() {
             });
             overlayContext.closePath();
             overlayContext.stroke();
+            const labelX = marker.corners[0].x * scaleX;
+            const labelY = Math.max(20, marker.corners[0].y * scaleY - 8);
+            const markerLabel = `ID ${marker.id}`;
+            const labelWidth = overlayContext.measureText(markerLabel).width + 12;
+            overlayContext.fillStyle = 'rgba(5, 10, 14, 0.82)';
+            overlayContext.fillRect(labelX, labelY - 17, labelWidth, 22);
+            overlayContext.fillStyle = '#f8fafc';
+            overlayContext.fillText(markerLabel, labelX + 6, labelY - 2);
         }
         detectedNode.textContent = String(markers.length);
+        updateTrackingStatus(markers.length);
         markerIdNode.textContent = markers.length
             ? markers.map((marker) => String(marker.id)).join(', ')
             : 'None';
@@ -299,6 +353,8 @@ function startVisionCamera() {
                     return;
                 }
                 cameraState.registeredMarkers = response.registeredMarkers ?? [];
+                cameraState.matchedMarkers = response.matchedMarkerIds?.length ?? 0;
+                updateTrackingStatus(markers.length);
                 registeredMarkerIdsNode.textContent = cameraState.registeredMarkers.length
                     ? cameraState.registeredMarkers.map(({ markerId, deviceId }) => `${markerId} -> ${deviceId}`).join(', ')
                     : 'None';
@@ -351,6 +407,14 @@ function startVisionCamera() {
     connectButton.addEventListener('click', () => {
         if (!cameraState.socket?.connected) {
             setStatus('The camera session is still connecting. Please wait a moment.', 'Connecting');
+            return;
+        }
+        connectCamera();
+    });
+    reconnectButton.addEventListener('click', () => {
+        if (!cameraState.socket?.connected) {
+            setStatus('The camera session is still connecting. Please wait a moment.', 'Connecting');
+            cameraState.socket?.connect();
             return;
         }
         connectCamera();

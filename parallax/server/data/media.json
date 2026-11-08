@@ -60,6 +60,26 @@
       "size": 42686491,
       "uploadedAt": "2026-11-08T05:52:29.444Z",
       "durationSeconds": 213.011458
+    },
+    {
+      "id": "6124bc6e-0107-4344-9f1f-90e6e5d3081e",
+      "filename": "84d969f9-e653-4950-ba91-7cad232ae08e.jpg",
+      "mediaType": "image",
+      "mimeType": "image/jpeg",
+      "url": "https://10.125.9.206:3001/uploads/84d969f9-e653-4950-ba91-7cad232ae08e.jpg",
+      "size": 15457,
+      "uploadedAt": "2026-11-08T13:23:46.604Z",
+      "durationSeconds": null
+    },
+    {
+      "id": "3ae4ebe6-8163-48af-84b2-582b98479cfb",
+      "filename": "4d3b4104-8818-4b99-98c4-e5db46ece999.jpg",
+      "mediaType": "image",
+      "mimeType": "image/jpeg",
+      "url": "https://10.125.9.206:3001/uploads/4d3b4104-8818-4b99-98c4-e5db46ece999.jpg",
+      "size": 213551,
+      "uploadedAt": "2026-11-08T13:29:06.336Z",
+      "durationSeconds": null
     }
   ],
   "uploadHistory": [
@@ -110,27 +130,43 @@
       "size": 42686491,
       "uploadedAt": "2026-11-08T05:52:29.444Z",
       "uploadStatus": "uploaded"
+    },
+    {
+      "id": "6124bc6e-0107-4344-9f1f-90e6e5d3081e",
+      "filename": "84d969f9-e653-4950-ba91-7cad232ae08e.jpg",
+      "mediaType": "image",
+      "size": 15457,
+      "uploadedAt": "2026-11-08T13:23:46.604Z",
+      "uploadStatus": "uploaded"
+    },
+    {
+      "id": "3ae4ebe6-8163-48af-84b2-582b98479cfb",
+      "filename": "4d3b4104-8818-4b99-98c4-e5db46ece999.jpg",
+      "mediaType": "image",
+      "size": 213551,
+      "uploadedAt": "2026-11-08T13:29:06.336Z",
+      "uploadStatus": "uploaded"
     }
   ],
   "playlists": [],
   "schedules": [],
   "activeScheduleId": null,
   "currentContent": {
-    "contentType": "video",
-    "videoUrl": "http://10.125.9.206:3001/uploads/05b734ce-97cd-44ca-95d8-63691b0848a8.mp4",
-    "updateId": "25dd8b97-9fcc-470d-a1bd-50a3b9fb8cd1",
-    "mediaId": "fa9c03fd-b264-4a93-8568-34e0fc292131",
-    "durationSeconds": 87.104,
+    "contentType": "image",
+    "imageUrl": "https://10.125.9.206:3001/uploads/4d3b4104-8818-4b99-98c4-e5db46ece999.jpg",
+    "updateId": "aef454cc-a9a2-493a-9d22-84963d48f2a0",
+    "mediaId": "3ae4ebe6-8163-48af-84b2-582b98479cfb",
+    "durationSeconds": null,
     "transition": "none",
-    "transitionAt": 1794121167110
+    "transitionAt": 1794144547998
   },
   "playback": {
-    "status": "playing",
-    "mediaId": "fa9c03fd-b264-4a93-8568-34e0fc292131",
+    "status": "stopped",
+    "mediaId": "3ae4ebe6-8163-48af-84b2-582b98479cfb",
     "positionSeconds": 0,
     "volume": 0.17,
-    "startedAt": 1794121173961,
-    "timelineId": "710a79ef-d4a7-425e-a820-37da0f72b55c",
+    "startedAt": null,
+    "timelineId": "b79e4639-9c95-4861-9c05-a0448ceaa45e",
     "playlistId": null,
     "playlistIndex": 0,
     "nextPlaylistIndex": null,

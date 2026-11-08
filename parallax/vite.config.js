@@ -4,17 +4,15 @@ export default defineConfig({
     server: {
         host: '0.0.0.0',
         port: 5173,
-        hmr: {
-            host: 'concerns-walking-junction-thursday.trycloudflare.com',
-            protocol: 'wss'
-        },
         allowedHosts: [
             'northwest-downloaded-paperback-implement.trycloudflare.com',
             'ancient-pubs-lions-volunteers.trycloudflare.com',
             'bristol-tribal-culture-airport.trycloudflare.com',
             'diagram-bacon-machine-harbour.trycloudflare.com',
             'featuring-liability-roll-rico.trycloudflare.com',
-            'concerns-walking-junction-thursday.trycloudflare.com'
+            'concerns-walking-junction-thursday.trycloudflare.com',
+            'diego-imports-pointing-discussions.trycloudflare.com',
+            'eric-nearest-robin-cute.trycloudflare.com'
         ],
         proxy: {
             '/api': {

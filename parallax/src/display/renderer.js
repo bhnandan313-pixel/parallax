@@ -9,6 +9,7 @@ import {
     expectedPlaybackPosition
 } from '../media/playback.js';
 import { DEFAULT_AUDIO_SETTINGS, getDeviceAudioState } from '../media/audio.js';
+import { resolveParallaxMediaUrl } from '../core/media-url.js';
 
 export function createContentRenderer({
     container,
@@ -597,16 +598,17 @@ export function createContentRenderer({
     }
 
     function render(content = currentContent) {
-        const mediaUrl = content?.contentType === 'image'
+        const sourceUrl = content?.contentType === 'image'
             ? content.imageUrl
             : content?.contentType === 'video' ? content.videoUrl : null;
         if (!content || !['image', 'video'].includes(content.contentType)
-            || typeof mediaUrl !== 'string'
+            || typeof sourceUrl !== 'string'
             || typeof content.updateId !== 'string'
             || !content.updateId) {
             onStatus('Connection error: Invalid content update', 'error');
             return;
         }
+        const mediaUrl = resolveParallaxMediaUrl(sourceUrl);
         if (activeMediaUrl === mediaUrl) {
             currentContent = content;
             redraw();
@@ -698,8 +700,9 @@ export function createContentRenderer({
             || media.mediaUrl.length > 2048) {
             return false;
         }
-        if (media.mediaUrl === activeMediaUrl
-            || (preloadedSource?.mediaUrl === media.mediaUrl
+        const mediaUrl = resolveParallaxMediaUrl(media.mediaUrl);
+        if (mediaUrl === activeMediaUrl
+            || (preloadedSource?.mediaUrl === mediaUrl
                 && preloadedSource.mediaType === media.mediaType)) {
             return true;
         }
@@ -707,7 +710,7 @@ export function createContentRenderer({
         const source = media.mediaType === 'image' ? createImage() : createVideo();
         const warmed = {
             mediaType: media.mediaType,
-            mediaUrl: media.mediaUrl,
+            mediaUrl,
             source,
             loaded: false
         };
@@ -728,7 +731,7 @@ export function createContentRenderer({
             source.playsInline = true;
             source.crossOrigin = 'anonymous';
         }
-        source.src = media.mediaUrl;
+        source.src = mediaUrl;
         source.load?.();
         return true;
     };

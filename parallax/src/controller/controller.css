@@ -1890,3 +1890,493 @@ body.controller-page #app {
         flex-direction: column;
     }
 }
+
+html.controller-page,
+body.controller-page,
+body.controller-page #app {
+    background: #090c11;
+}
+
+.controller-shell {
+    width: min(1280px, calc(100% - 48px));
+    padding-top: 20px;
+}
+
+.controller-header {
+    gap: 20px;
+    padding-bottom: 18px;
+    border-color: #202630;
+}
+
+.brand-mark {
+    background: #7c6cf0;
+    box-shadow: none;
+}
+
+.connection-dot.is-online,
+.screen-row.is-connected .screen-state i,
+.live-badge i {
+    box-shadow: none;
+}
+
+.settings-link {
+    min-height: 38px;
+    padding: 9px 13px;
+    border: 1px solid #29313d;
+    border-radius: 8px;
+    color: #d3dae5;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.settings-link:hover,
+.settings-link:focus-visible {
+    border-color: #64748b;
+    color: #fff;
+}
+
+.controller-intro {
+    padding: 28px 0 20px;
+}
+
+.controller-intro h1 {
+    font-size: clamp(26px, 3vw, 36px);
+}
+
+.controller-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 0.9fr);
+    align-items: start;
+    gap: 16px;
+}
+
+.controller-side {
+    gap: 12px;
+}
+
+.controller-card {
+    padding: 20px;
+    border-color: #232b35;
+    border-radius: 12px;
+    background: #11161d;
+    box-shadow: none;
+}
+
+.card-heading h2 {
+    font-size: 18px;
+}
+
+.eyebrow {
+    color: #a5b4fc;
+}
+
+.device-count {
+    color: #f1f5f9;
+    font-size: 18px;
+}
+
+.device-count small {
+    color: #a0a9b7;
+}
+
+.screen-config-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 14px;
+}
+
+.vision-spatial-panel {
+    gap: 12px;
+    margin-top: 20px;
+}
+
+.vision-spatial-heading,
+.vision-spatial-heading > span {
+    display: flex;
+    align-items: center;
+}
+
+.vision-spatial-heading {
+    justify-content: space-between;
+}
+
+.vision-spatial-heading h3 {
+    color: #e8edf5;
+    font-size: 14px;
+}
+
+.vision-spatial-heading > span {
+    gap: 7px;
+    color: #a5b4fc;
+    font-size: 11px;
+}
+
+.vision-spatial-heading > span::before {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #64748b;
+    content: "";
+}
+
+.vision-spatial-preview {
+    min-height: clamp(230px, 26vw, 340px);
+    border: 1px solid #26303a;
+    border-radius: 10px;
+    background:
+        linear-gradient(rgba(148, 163, 184, 0.09) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, 0.09) 1px, transparent 1px),
+        #0c1117;
+    background-size: 32px 32px;
+}
+
+.vision-spatial-point {
+    display: grid;
+    width: 12px;
+    height: 12px;
+    place-items: center;
+    border: 2px solid #f8fafc;
+    background: #22c55e;
+}
+
+.vision-spatial-point.is-tracked {
+    background: #22c55e;
+    box-shadow: none;
+}
+
+.vision-spatial-point.is-lost,
+.vision-spatial-point.is-missing {
+    background: #ef4444;
+}
+
+.vision-spatial-label {
+    position: absolute;
+    top: 13px;
+    left: 8px;
+    width: max-content;
+    max-width: 160px;
+    padding: 4px 7px;
+    border: 1px solid #334155;
+    border-radius: 5px;
+    background: #11161df0;
+    color: #e2e8f0;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.management-disclosure,
+.advanced-settings {
+    min-width: 0;
+    color: #cbd5e1;
+}
+
+.management-disclosure > summary,
+.advanced-settings > summary,
+.vision-debug-panel > summary {
+    min-height: 40px;
+    padding: 11px 0;
+    color: #aeb8c6;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    list-style-position: inside;
+}
+
+.management-disclosure > summary:hover,
+.advanced-settings > summary:hover,
+.vision-debug-panel > summary:hover {
+    color: #f8fafc;
+}
+
+.management-disclosure[open] > summary,
+.advanced-settings[open] > summary {
+    margin-bottom: 8px;
+}
+
+.device-management,
+.current-preview-disclosure {
+    border-top: 1px solid #27303b;
+}
+
+.current-preview-disclosure > .current-card {
+    padding: 14px 0 0;
+    border: 0;
+    background: transparent;
+}
+
+.panorama-dashboard,
+.media-management {
+    margin-top: 16px;
+}
+
+.dashboard-metrics span {
+    color: #aeb8c6;
+}
+
+.panorama-preview-wrap,
+.dashboard-devices-wrap {
+    border-color: #27303b;
+}
+
+.panorama-wall {
+    gap: 10px;
+}
+
+.dashboard-screen-card {
+    min-width: 0;
+    padding: 13px;
+    border-color: #2a3440;
+    border-radius: 9px;
+    background: #0e141b;
+}
+
+.dashboard-screen-card.is-online {
+    border-color: #315746;
+}
+
+.dashboard-screen-card.is-offline {
+    border-color: #6a5331;
+}
+
+.dashboard-screen-heading {
+    gap: 8px;
+}
+
+.dashboard-screen-number {
+    font-size: 10px;
+}
+
+.dashboard-screen-device {
+    margin-top: 9px;
+    font-size: 12px;
+}
+
+.dashboard-device-name,
+.dashboard-screen-meta {
+    color: #98a4b3;
+}
+
+.dashboard-assignment-control select,
+.screen-config-controls select,
+.layout-config-controls select,
+.layout-config-controls input,
+.layout-preset-controls select,
+.layout-preset-controls input,
+.screen-geometry-controls select,
+.screen-geometry-controls input,
+.media-library-toolbar input,
+.media-library-toolbar select,
+.playlist-editor input,
+.playlist-editor select,
+.schedule-controls input,
+.schedule-controls select,
+.audio-mode-controls select {
+    border-color: #303b48;
+    border-radius: 7px;
+    background: #0c1117;
+    color: #e2e8f0;
+}
+
+.dashboard-assignment-control {
+    color: #aeb8c6;
+}
+
+.dashboard-screen-actions button,
+.dashboard-identify-button,
+.alignment-action {
+    min-height: 40px;
+    border-color: #344255;
+    border-radius: 8px;
+    background: #18212c;
+    color: #dbe5f1;
+}
+
+.alignment-action:hover:not(:disabled),
+.dashboard-screen-actions button:hover:not(:disabled) {
+    border-color: #68778b;
+    background: #202b38;
+}
+
+.publish-button {
+    border-radius: 8px;
+    background: #5b55c8;
+}
+
+.publish-button:disabled {
+    background: #2a313c;
+}
+
+.drop-zone {
+    border-color: #384354;
+    border-radius: 10px;
+    background: #0e141b;
+}
+
+.drop-zone:hover,
+.drop-zone.is-dragging {
+    border-color: #8492ff;
+    background: #151a25;
+}
+
+.upload-icon {
+    background: #20293a;
+    color: #c7d2fe;
+}
+
+.image-preview,
+.current-image {
+    border-color: #26303a;
+    background: #0b1016;
+}
+
+.status-badge,
+.step-badge {
+    border-color: #344255;
+}
+
+.advanced-settings {
+    margin-top: 24px;
+    padding: 0 18px 14px;
+    border: 1px solid #26303a;
+    border-radius: 10px;
+    background: #0e1319;
+    scroll-margin-top: 16px;
+}
+
+.advanced-settings > summary {
+    min-height: 48px;
+    color: #d1d9e4;
+}
+
+.advanced-settings > .controller-card {
+    margin-top: 12px;
+}
+
+.media-management > .media-playlists,
+.media-management > .schedule-disclosure,
+.playback-more,
+.media-management .playback-controls > .management-disclosure {
+    border-top: 1px solid #27303b;
+}
+
+.media-management .management-disclosure > summary {
+    padding: 12px 0;
+}
+
+.playback-more > summary {
+    min-height: 40px;
+}
+
+.playback-buttons .alignment-action {
+    flex: 1 1 84px;
+}
+
+.vision-observation {
+    border-color: #25303b;
+    color: #aeb8c6;
+}
+
+.dashboard-empty-state {
+    color: #93a0b0;
+}
+
+.controller-footer {
+    border-color: #202630;
+    color: #8390a0;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    clip-path: inset(50%);
+}
+
+@media (max-width: 900px) {
+    .controller-shell {
+        width: min(100% - 36px, 760px);
+    }
+
+    .controller-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .controller-side {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .vision-spatial-preview {
+        min-height: 280px;
+    }
+}
+
+@media (max-width: 600px) {
+    .controller-shell {
+        width: calc(100% - 24px);
+        padding-top: 12px;
+    }
+
+    .controller-header {
+        flex-wrap: wrap;
+        gap: 10px 14px;
+    }
+
+    .connection-summary {
+        order: 3;
+        width: 100%;
+    }
+
+    .settings-link {
+        margin-left: auto;
+    }
+
+    .controller-intro {
+        padding: 22px 0 16px;
+    }
+
+    .controller-card {
+        padding: 16px;
+    }
+
+    .panorama-wall {
+        gap: 7px;
+    }
+
+    .dashboard-screen-card {
+        padding: 9px;
+    }
+
+    .dashboard-screen-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .screen-config-controls,
+    .layout-config-controls,
+    .layout-preset-controls,
+    .preset-controls {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .advanced-settings {
+        padding-right: 12px;
+        padding-left: 12px;
+    }
+
+    .advanced-settings > .controller-card {
+        padding: 14px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .controller-root *,
+    .controller-root *::before,
+    .controller-root *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
+}

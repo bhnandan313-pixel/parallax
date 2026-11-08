@@ -388,3 +388,339 @@ body,
         transition: none;
     }
 }
+
+.vision-camera-shell {
+    display: block;
+    height: 100%;
+    min-height: 100dvh;
+    overflow-y: auto;
+    padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+        max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    background: #090c11;
+    color: #e7edf5;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.vision-camera-panel {
+    display: flex;
+    width: min(100%, 760px);
+    min-height: calc(100dvh - 24px);
+    max-height: none;
+    margin: 0 auto;
+    overflow: visible;
+    gap: 12px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.vision-camera-header {
+    display: flex;
+    min-height: 52px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.vision-brand {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+    color: #f8fafc;
+    font-size: 13px;
+    font-weight: 750;
+    letter-spacing: 0.1em;
+    text-decoration: none;
+}
+
+.vision-brand-mark {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border-radius: 8px;
+    background: #5b55c8;
+    font-size: 17px;
+    letter-spacing: 0;
+}
+
+.vision-brand small {
+    display: block;
+    margin-top: 2px;
+    color: #9aa8b8;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+}
+
+.vision-session-state {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 7px;
+    color: #b7c1ce;
+    font-size: 11px;
+}
+
+.vision-session-id {
+    max-width: 100px;
+    overflow: hidden;
+    color: #8290a1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vision-connection-indicator {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 50%;
+    background: #fbbf24;
+}
+
+.vision-connection-indicator.is-online {
+    background: #22c55e;
+}
+
+.vision-connection-indicator.is-warning {
+    background: #fbbf24;
+}
+
+.vision-connection-indicator.is-error {
+    background: #ef4444;
+}
+
+.vision-camera-preview-wrap {
+    display: grid;
+    min-height: 0;
+    flex: 1;
+    place-items: center;
+    border: 1px solid #26303a;
+    border-radius: 12px;
+    background: #020609;
+}
+
+.vision-camera-preview {
+    width: 100%;
+    height: 100%;
+    min-height: min(52dvh, 500px);
+    max-height: none;
+    object-fit: cover;
+    background: #020609;
+}
+
+.vision-camera-marker-overlay {
+    width: 100%;
+    height: 100%;
+}
+
+.vision-camera-overlay {
+    right: 10px;
+    bottom: 10px;
+    max-width: calc(100% - 20px);
+    padding: 8px 11px;
+    border: 1px solid #354354;
+    background: rgba(8, 12, 17, 0.86);
+    color: #dce5ef;
+    font-size: 12px;
+}
+
+.vision-tracking-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 16px;
+    padding: 12px 14px;
+    border: 1px solid #26303a;
+    border-radius: 10px;
+    background: #11161d;
+}
+
+.vision-tracking-summary > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.vision-tracking-summary > div > span {
+    color: #9aa8b8;
+    font-size: 11px;
+}
+
+.vision-tracking-summary strong {
+    color: #f1f5f9;
+    font-size: 18px;
+}
+
+.vision-tracking-summary p {
+    grid-column: 1 / -1;
+    min-height: 18px;
+    color: #fbbf24;
+    font-size: 11px;
+}
+
+.vision-tracking-summary p[data-state="tracking"] {
+    color: #4ade80;
+}
+
+.vision-tracking-summary p[data-state="inactive"] {
+    color: #94a3b8;
+}
+
+.vision-camera-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.vision-camera-source {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    grid-column: 1 / -1;
+    padding: 0 12px;
+    border: 1px solid #344255;
+    border-radius: 8px;
+    background: #11161d;
+    color: #e7edf5;
+    font: inherit;
+}
+
+.vision-camera-button {
+    min-width: 0;
+    min-height: 48px;
+    padding: 8px;
+    border: 1px solid #344255;
+    border-radius: 8px;
+    background: #18212c;
+    color: #e2e8f0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.vision-camera-button.is-primary {
+    border-color: #5b55c8;
+    background: #5b55c8;
+    color: #fff;
+}
+
+.vision-camera-button.is-subtle {
+    background: #11161d;
+    color: #aeb8c6;
+}
+
+.vision-camera-button:focus-visible,
+.vision-camera-source:focus-visible {
+    outline: 2px solid #a5b4fc;
+    outline-offset: 2px;
+}
+
+.vision-debug-panel {
+    border-top: 1px solid #26303a;
+    color: #aeb8c6;
+}
+
+.vision-debug-panel > summary {
+    min-height: 40px;
+    padding: 12px 0;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.vision-camera-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+    font-size: 11px;
+}
+
+.vision-camera-metadata p {
+    padding: 8px;
+    border-color: #26303a;
+    border-radius: 7px;
+    background: #11161d;
+    color: #aeb8c6;
+}
+
+.vision-camera-metadata strong {
+    color: #e2e8f0;
+}
+
+@media (max-width: 520px) {
+    .vision-camera-shell {
+        padding-right: max(10px, env(safe-area-inset-right));
+        padding-left: max(10px, env(safe-area-inset-left));
+    }
+
+    .vision-camera-panel {
+        width: 100%;
+        min-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 22px);
+    }
+
+    .vision-camera-header {
+        min-height: 44px;
+    }
+
+    .vision-session-state {
+        gap: 5px;
+        font-size: 10px;
+    }
+
+    .vision-session-id {
+        display: none;
+    }
+
+    .vision-camera-preview-wrap {
+        min-height: min(48dvh, 460px);
+    }
+
+    .vision-camera-preview {
+        min-height: min(48dvh, 460px);
+    }
+
+    .vision-camera-metadata {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+    .vision-camera-panel {
+        width: min(100%, 980px);
+        min-height: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(240px, 0.45fr);
+        grid-template-rows: auto 1fr auto auto;
+        align-items: start;
+    }
+
+    .vision-camera-header,
+    .vision-debug-panel {
+        grid-column: 1 / -1;
+    }
+
+    .vision-camera-preview-wrap {
+        grid-row: 2 / span 2;
+        min-height: 0;
+    }
+
+    .vision-camera-preview {
+        min-height: 0;
+    }
+
+    .vision-tracking-summary,
+    .vision-camera-controls {
+        grid-column: 2;
+    }
+
+    .vision-camera-controls {
+        grid-template-columns: 1fr;
+    }
+
+    .vision-camera-source {
+        grid-column: auto;
+    }
+}

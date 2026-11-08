@@ -5,6 +5,7 @@ import { createDefaultLayout, validateDisplayLayout } from '../display/geometry.
 import { expectedPlaybackPosition } from '../media/playback.js';
 import { synchronizePreviewVideo } from '../media/preview-sync.js';
 import { createAudioSettings, DEFAULT_AUDIO_SETTINGS } from '../media/audio.js';
+import { resolveParallaxMediaUrl } from '../core/media-url.js';
 import { isFullscreen, toggleFullscreen } from '../media/fullscreen.js';
 import QRCode from 'qrcode';
 import './controller.css';
@@ -33,6 +34,7 @@ export function mountController() {
                     <span class="connection-dot" data-controller-connection></span>
                     <span data-controller-connection-label>Connecting to display system</span>
                 </div>
+                <a class="settings-link" href="#settings" data-settings-link>Settings</a>
             </header>
 
             <section class="controller-intro">
@@ -103,11 +105,17 @@ export function mountController() {
                         </button>
                         <p class="network-note" data-vision-status>Vision camera not connected.</p>
                         <div class="vision-spatial-panel">
-                            <h3>Spatial observations</h3>
+                            <div class="vision-spatial-heading">
+                                <h3>Spatial preview</h3>
+                                <span>Live tracking</span>
+                            </div>
                             <div class="vision-spatial-preview" data-vision-spatial-preview>
                                 <p class="dashboard-empty-state">No tracked markers.</p>
                             </div>
-                            <div class="vision-observation-list" data-vision-observations></div>
+                            <details class="management-disclosure">
+                                <summary>Observation details</summary>
+                                <div class="vision-observation-list" data-vision-observations></div>
+                            </details>
                         </div>
                         <div class="screen-config-controls">
                             <label>Screen count
@@ -126,30 +134,36 @@ export function mountController() {
                                 Apply configuration
                             </button>
                         </div>
-                        <div class="screen-list" data-screen-list></div>
-                        <h3 class="device-list-heading">Registered devices</h3>
-                        <div class="device-assignment-list" data-device-assignment-list></div>
-                        <p class="alignment-status" data-assignment-status role="status" aria-live="polite"></p>
+                        <details class="management-disclosure">
+                            <summary>Device management</summary>
+                            <div class="screen-list" data-screen-list></div>
+                            <h3 class="device-list-heading">Registered devices</h3>
+                            <div class="device-assignment-list" data-device-assignment-list></div>
+                            <p class="alignment-status" data-assignment-status role="status" aria-live="polite"></p>
+                        </details>
                         <p class="network-note" data-network-note>Waiting for phones to connect.</p>
                     </section>
 
-                    <section class="controller-card current-card">
-                        <div class="card-heading">
-                            <div>
-                                <p class="eyebrow">NOW SHOWING</p>
-                                <h2>Current display</h2>
+                    <details class="management-disclosure current-preview-disclosure">
+                        <summary>Current screen preview</summary>
+                        <section class="controller-card current-card">
+                            <div class="card-heading">
+                                <div>
+                                    <p class="eyebrow">NOW SHOWING</p>
+                                    <h2>Current display</h2>
+                                </div>
+                                <span class="live-badge"><i></i> LIVE</span>
                             </div>
-                            <span class="live-badge"><i></i> LIVE</span>
-                        </div>
-                        <div class="current-image" data-current-image>
-                            <div class="current-placeholder">No media published yet</div>
-                        </div>
-                        <button class="alignment-action" type="button" data-controller-fullscreen>
-                            Fullscreen preview
-                        </button>
-                        <p class="current-content-name" data-current-name>Waiting for content</p>
-                        <p class="current-content-meta" data-current-meta>Connect a display to get started</p>
-                    </section>
+                            <div class="current-image" data-current-image>
+                                <div class="current-placeholder">No media published yet</div>
+                            </div>
+                            <button class="alignment-action" type="button" data-controller-fullscreen>
+                                Fullscreen preview
+                            </button>
+                            <p class="current-content-name" data-current-name>Waiting for content</p>
+                            <p class="current-content-meta" data-current-meta>Connect a display to get started</p>
+                        </section>
+                    </details>
                 </aside>
             </section>
 
@@ -184,13 +198,13 @@ export function mountController() {
                 <div class="media-library" data-content-library>
                     <p class="dashboard-empty-state">Uploaded media will appear here.</p>
                 </div>
-                <div class="media-history">
-                    <h3>Upload history</h3>
-                    <div data-upload-history><p class="dashboard-empty-state">No uploads yet.</p></div>
-                </div>
                 <div class="media-playlists">
-                    <h3>Image and video playlists</h3>
-                    <div class="playlist-editor">
+                    <details class="management-disclosure">
+                        <summary>Playlists and upload history</summary>
+                        <h3>Upload history</h3>
+                        <div data-upload-history><p class="dashboard-empty-state">No uploads yet.</p></div>
+                        <h3>Image and video playlists</h3>
+                        <div class="playlist-editor">
                         <label>Playlist name
                             <input type="text" maxlength="64" data-playlist-name placeholder="Playlist name">
                         </label>
@@ -213,20 +227,24 @@ export function mountController() {
                         <button class="alignment-action" type="button" data-playlist-load>Load playlist</button>
                         <button class="alignment-action is-danger" type="button" data-playlist-delete>Delete playlist</button>
                         <button class="alignment-action" type="button" data-playlist-preview>Preview playlist</button>
-                    </div>
-                    <div class="playlist-draft" data-playlist-draft>
-                        <p class="dashboard-empty-state">Add media from the library to build a playlist.</p>
-                    </div>
+                        </div>
+                        <div class="playlist-draft" data-playlist-draft>
+                            <p class="dashboard-empty-state">Add media from the library to build a playlist.</p>
+                        </div>
+                    </details>
                 </div>
                 <div class="playback-controls">
-                    <h3>Video Playback Controls</h3>
+                    <h3>Playback</h3>
                     <div class="playback-buttons">
                         <button class="alignment-action" type="button" data-playback-previous>Previous</button>
                         <button class="alignment-action" type="button" data-playback-play>Play</button>
                         <button class="alignment-action" type="button" data-playback-pause>Pause</button>
-                        <button class="alignment-action" type="button" data-playback-resume>Resume</button>
                         <button class="alignment-action" type="button" data-playback-stop>Stop</button>
                         <button class="alignment-action" type="button" data-playback-next>Next</button>
+                        <details class="management-disclosure playback-more">
+                            <summary>More</summary>
+                            <button class="alignment-action" type="button" data-playback-resume>Resume</button>
+                        </details>
                     </div>
                     <label class="playback-seek">Position
                         <input type="range" min="0" max="0" step="0.1" value="0" data-playback-seek disabled>
@@ -240,7 +258,9 @@ export function mountController() {
                     <button class="alignment-action" type="button" data-playback-mute disabled>
                         Unmute
                     </button>
-                    <div class="audio-mode-controls">
+                    <details class="management-disclosure">
+                        <summary>Audio configuration</summary>
+                        <div class="audio-mode-controls">
                         <label>Audio mode
                             <select data-audio-mode>
                                 <option value="master">Master audio (one phone)</option>
@@ -253,9 +273,12 @@ export function mountController() {
                         <p data-audio-mode-status role="status">
                             Master Audio Mode is active. Select a phone to enable its output.
                         </p>
-                    </div>
+                        </div>
+                    </details>
                 </div>
-                <div class="schedule-controls">
+                <details class="management-disclosure schedule-disclosure">
+                    <summary>Playback scheduling</summary>
+                    <div class="schedule-controls">
                     <h3>Scheduled playback</h3>
                     <label>Media or playlist
                         <select data-schedule-target></select>
@@ -271,7 +294,8 @@ export function mountController() {
                     </label>
                     <button class="alignment-action" type="button" data-schedule-create>Create schedule</button>
                     <div class="schedule-list" data-schedule-list></div>
-                </div>
+                    </div>
+                </details>
                 <p class="alignment-status" data-media-status role="status" aria-live="polite"></p>
             </section>
 
@@ -283,7 +307,7 @@ export function mountController() {
                     </div>
                     <div class="dashboard-metrics">
                         <span><strong data-dashboard-screen-count>2</strong> screens</span>
-                        <span><strong data-dashboard-device-count>0</strong> connected</span>
+                        <span class="visually-hidden"><strong data-dashboard-device-count>0</strong> connected</span>
                     </div>
                 </div>
                 <p class="card-description">Drag a connected device onto a screen to assign it. You can also use each screen's assignment menu.</p>
@@ -303,13 +327,18 @@ export function mountController() {
                         <h3>Device information</h3>
                         <span>Drag a device card to a screen</span>
                     </div>
-                    <div class="dashboard-devices" data-dashboard-devices>
-                        <p class="dashboard-empty-state">No devices have registered yet.</p>
-                    </div>
+                    <details class="management-disclosure">
+                        <summary>Registered devices</summary>
+                        <div class="dashboard-devices" data-dashboard-devices>
+                            <p class="dashboard-empty-state">No devices have registered yet.</p>
+                        </div>
+                    </details>
                 </div>
                 <p class="dashboard-status" data-dashboard-status role="status" aria-live="polite"></p>
             </section>
 
+            <details class="advanced-settings" id="settings">
+                <summary>Advanced settings · layout, calibration, alignment and diagnostics</summary>
             <section class="controller-card layout-config-card" aria-labelledby="layout-config-title">
                 <div class="card-heading">
                     <div>
@@ -429,6 +458,7 @@ export function mountController() {
                 </div>
                 <div class="diagnostics-grid" data-diagnostics-screens></div>
             </section>
+            </details>
 
             <dialog class="pairing-dialog" data-pairing-dialog aria-labelledby="pairing-title">
                 <div class="pairing-dialog-heading">
@@ -505,6 +535,10 @@ export function mountController() {
             </footer>
         </main>
     `;
+
+    root.querySelector('[data-settings-link]').addEventListener('click', () => {
+        root.querySelector('#settings').open = true;
+    });
 
     const fileInput = root.querySelector('[data-file-input]');
     const dropZone = root.querySelector('[data-drop-zone]');
@@ -663,7 +697,7 @@ export function mountController() {
             device.connected && device.enabled !== false).length;
         root.querySelector('[data-dashboard-device-count]').textContent = String(connectedCount);
         dashboardWall.style.gridTemplateColumns =
-            `repeat(${displayLayout.columns}, minmax(180px, 1fr))`;
+            `repeat(${displayLayout.columns}, minmax(0, 1fr))`;
         dashboardWall.style.gridTemplateRows =
             `repeat(${displayLayout.rows}, minmax(0, auto))`;
         dashboardWall.innerHTML = Array.from({ length: totalScreens }, (_, index) => {
@@ -700,50 +734,55 @@ export function mountController() {
                             ${assignmentOptions}
                         </select>
                     </label>
-                    <div class="dashboard-alignment">
-                        <span>H <strong data-dashboard-alignment="${screen}-horizontal">${settings.horizontal.toFixed(1)} px</strong></span>
-                        <span>V <strong data-dashboard-alignment="${screen}-vertical">${settings.vertical.toFixed(1)} px</strong></span>
-                        <span>Scale <strong data-dashboard-alignment="${screen}-scale">${settings.scale.toFixed(3)}×</strong></span>
-                    </div>
-                    <p class="dashboard-screen-meta">Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'} ·
-                        ${device && connected
-                            ? `${displayStatus?.displayStatus ?? 'Waiting'} · ${formatTimestamp(displayStatus?.lastActivity)}`
-                            : device ? 'Last activity unavailable' : 'No activity yet'}
-                    </p>
-                    <p class="dashboard-screen-meta">Alignment delivery: ${
-                        displayStatus?.alignmentSynced === true
-                            ? 'Received latest settings'
-                            : displayStatus?.alignmentSynced === false
-                                ? 'Waiting for device confirmation'
-                                : 'Unknown'
-                    }</p>
-                    <p class="dashboard-screen-meta">Alignment updated: ${formatTimestamp(diagnostics?.alignmentUpdatedAt)}</p>
                     <div class="dashboard-screen-actions">
                         <button type="button" data-screen-identify="${screen}" ${!connected ? 'disabled' : ''}>
                             Identify
                         </button>
-                        <button type="button" data-screen-alignment="${screen}">View alignment</button>
-                        <button type="button" data-screen-reset="${screen}" ${!alignmentReady ? 'disabled' : ''}>
-                            Reset alignment
-                        </button>
                     </div>
-                    <div class="screen-geometry-controls">
-                        <label>Row<input type="number" min="0" max="11" value="${geometry.row}"
-                            data-screen-position="${screen}" data-position-axis="row" ${!socket.connected ? 'disabled' : ''}></label>
-                        <label>Column<input type="number" min="0" max="11" value="${geometry.column}"
-                            data-screen-position="${screen}" data-position-axis="column" ${!socket.connected ? 'disabled' : ''}></label>
-                        <label>Rotation<select data-screen-rotation="${screen}" ${!socket.connected ? 'disabled' : ''}>
-                            ${[0, 90, 180, 270].map((degrees) =>
-                                `<option value="${degrees}" ${geometry.rotation === degrees ? 'selected' : ''}>${degrees}°</option>`).join('')}
-                        </select></label>
-                        <label>Orientation<select data-screen-orientation="${screen}" ${!socket.connected ? 'disabled' : ''}>
-                            ${[['auto', 'Auto'], ['portrait', 'Portrait'], ['landscape', 'Landscape']]
-                                .map(([value, name]) =>
-                                    `<option value="${value}" ${geometry.orientation === value ? 'selected' : ''}>${name}</option>`).join('')}
-                        </select></label>
-                        <label class="screen-enabled-control"><input type="checkbox" data-screen-enabled="${screen}"
-                            ${enabled ? 'checked' : ''} ${!socket.connected ? 'disabled' : ''}> Enabled</label>
-                    </div>
+                    <details class="management-disclosure screen-options">
+                        <summary>Advanced screen settings</summary>
+                        <div class="dashboard-alignment">
+                            <span>H <strong data-dashboard-alignment="${screen}-horizontal">${settings.horizontal.toFixed(1)} px</strong></span>
+                            <span>V <strong data-dashboard-alignment="${screen}-vertical">${settings.vertical.toFixed(1)} px</strong></span>
+                            <span>Scale <strong data-dashboard-alignment="${screen}-scale">${settings.scale.toFixed(3)}×</strong></span>
+                        </div>
+                        <p class="dashboard-screen-meta">Grid state (server): ${calibrationEnabled ? 'Enabled' : 'Disabled'} ·
+                            ${device && connected
+                                ? `${displayStatus?.displayStatus ?? 'Waiting'} · ${formatTimestamp(displayStatus?.lastActivity)}`
+                                : device ? 'Last activity unavailable' : 'No activity yet'}
+                        </p>
+                        <p class="dashboard-screen-meta">Alignment delivery: ${
+                            displayStatus?.alignmentSynced === true
+                                ? 'Received latest settings'
+                                : displayStatus?.alignmentSynced === false
+                                    ? 'Waiting for device confirmation'
+                                    : 'Unknown'
+                        }</p>
+                        <p class="dashboard-screen-meta">Alignment updated: ${formatTimestamp(diagnostics?.alignmentUpdatedAt)}</p>
+                        <div class="dashboard-screen-actions">
+                            <button type="button" data-screen-alignment="${screen}">View alignment</button>
+                            <button type="button" data-screen-reset="${screen}" ${!alignmentReady ? 'disabled' : ''}>
+                                Reset alignment
+                            </button>
+                        </div>
+                        <div class="screen-geometry-controls">
+                            <label>Row<input type="number" min="0" max="11" value="${geometry.row}"
+                                data-screen-position="${screen}" data-position-axis="row" ${!socket.connected ? 'disabled' : ''}></label>
+                            <label>Column<input type="number" min="0" max="11" value="${geometry.column}"
+                                data-screen-position="${screen}" data-position-axis="column" ${!socket.connected ? 'disabled' : ''}></label>
+                            <label>Rotation<select data-screen-rotation="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                                ${[0, 90, 180, 270].map((degrees) =>
+                                    `<option value="${degrees}" ${geometry.rotation === degrees ? 'selected' : ''}>${degrees}°</option>`).join('')}
+                            </select></label>
+                            <label>Orientation<select data-screen-orientation="${screen}" ${!socket.connected ? 'disabled' : ''}>
+                                ${[['auto', 'Auto'], ['portrait', 'Portrait'], ['landscape', 'Landscape']]
+                                    .map(([value, name]) =>
+                                        `<option value="${value}" ${geometry.orientation === value ? 'selected' : ''}>${name}</option>`).join('')}
+                            </select></label>
+                            <label class="screen-enabled-control"><input type="checkbox" data-screen-enabled="${screen}"
+                                ${enabled ? 'checked' : ''} ${!socket.connected ? 'disabled' : ''}> Enabled</label>
+                        </div>
+                    </details>
                 </article>
             `;
         }).join('');
@@ -1809,13 +1848,13 @@ export function mountController() {
 
     function setCurrentContent(imageUrl, filename, width, height) {
         const currentImage = root.querySelector('[data-current-image]');
-        panoramaImageUrl = imageUrl;
+        panoramaImageUrl = resolveParallaxMediaUrl(imageUrl);
         panoramaMediaType = 'image';
         currentImage.replaceChildren();
         const image = document.createElement('img');
         image.dataset.currentMedia = 'true';
-        image.dataset.sourceUrl = new URL(imageUrl, window.location.href).href;
-        image.src = imageUrl;
+        image.dataset.sourceUrl = new URL(panoramaImageUrl, window.location.href).href;
+        image.src = panoramaImageUrl;
         image.alt = `Currently published panorama: ${filename}`;
         currentImage.append(image);
         root.querySelector('[data-current-name]').textContent = filename;
@@ -1838,7 +1877,7 @@ export function mountController() {
         const element = item.mediaType === 'video'
             ? document.createElement('video')
             : document.createElement('img');
-        element.src = item.url;
+        element.src = resolveParallaxMediaUrl(item.url);
         if (item.mediaType === 'video') {
             element.controls = true;
             element.muted = true;
@@ -1886,16 +1925,18 @@ export function mountController() {
                 mediaThumbnails.set(item.id, thumbnail);
             }
             if (item.mediaType === 'image') {
-                if (thumbnail.dataset.sourceUrl !== item.url) {
-                    thumbnail.src = item.url;
-                    thumbnail.dataset.sourceUrl = item.url;
+                const mediaUrl = resolveParallaxMediaUrl(item.url);
+                if (thumbnail.dataset.sourceUrl !== mediaUrl) {
+                    thumbnail.src = mediaUrl;
+                    thumbnail.dataset.sourceUrl = mediaUrl;
                 }
                 thumbnail.alt = '';
             } else {
                 thumbnail.classList.add('is-video');
-                if (thumbnail.dataset.sourceUrl !== item.url) {
-                    thumbnail.src = item.url;
-                    thumbnail.dataset.sourceUrl = item.url;
+                const mediaUrl = resolveParallaxMediaUrl(item.url);
+                if (thumbnail.dataset.sourceUrl !== mediaUrl) {
+                    thumbnail.src = mediaUrl;
+                    thumbnail.dataset.sourceUrl = mediaUrl;
                 }
                 thumbnail.muted = true;
                 thumbnail.playsInline = true;
@@ -2166,11 +2207,12 @@ export function mountController() {
     }
 
     function setCurrentMedia(content, item) {
-        const mediaUrl = item.mediaType === 'video' ? content.videoUrl : content.imageUrl;
+        const sourceUrl = item.mediaType === 'video' ? content.videoUrl : content.imageUrl;
         const currentImage = root.querySelector('[data-current-image]');
-        if (typeof mediaUrl !== 'string') {
+        if (typeof sourceUrl !== 'string') {
             return;
         }
+        const mediaUrl = resolveParallaxMediaUrl(sourceUrl);
         currentMediaId = item.id;
         panoramaImageUrl = mediaUrl;
         panoramaMediaType = item.mediaType;
@@ -2415,6 +2457,12 @@ export function mountController() {
             dot.style.left = `${Math.max(2, Math.min(98, Number(observation.relativeX ?? observation.x ?? 0) * 100))}%`;
             dot.style.top = `${Math.max(2, Math.min(98, Number(observation.relativeY ?? observation.y ?? 0) * 100))}%`;
             dot.title = `${name} · marker ${observation.id}`;
+            dot.setAttribute('aria-label',
+                `${registered?.screen ? `Screen ${registered.screen}` : name}, marker ${observation.id}, ${trackingState}`);
+            const label = document.createElement('span');
+            label.className = 'vision-spatial-label';
+            label.textContent = registered?.screen ? `Screen ${registered.screen}` : name;
+            dot.append(label);
             visionSpatialPreview.append(dot);
         }
         if (observations.length === 0) {
