@@ -113,7 +113,7 @@ export function computeMarkerIdForDevice(deviceId) {
 }
 
 export const MIN_PARALLAX_MARKER_ID = 1;
-export const MAX_PARALLAX_MARKER_ID = 999;
+export const MAX_PARALLAX_MARKER_ID = ARUCO_MARKER_ID_MAX;
 
 export function allocateMarkerId(deviceId, usedMarkerIds) {
     if (typeof deviceId !== 'string' || !deviceId.trim()) {

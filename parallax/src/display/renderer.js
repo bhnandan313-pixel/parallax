@@ -607,10 +607,12 @@ export function createContentRenderer({
             onStatus('Connection error: Invalid content update', 'error');
             return;
         }
-        if (content.contentType === 'video' && loadedVideo && activeMediaUrl === mediaUrl) {
+        if (activeMediaUrl === mediaUrl) {
             currentContent = content;
             redraw();
-            synchronizeVideo();
+            if (loadedVideo) {
+                synchronizeVideo();
+            }
             scheduleContentTransition(content);
             return;
         }

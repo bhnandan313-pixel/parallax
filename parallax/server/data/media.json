@@ -30,6 +30,36 @@
       "size": 1528916,
       "uploadedAt": "2026-11-04T12:50:54.110Z",
       "durationSeconds": null
+    },
+    {
+      "id": "fa9c03fd-b264-4a93-8568-34e0fc292131",
+      "filename": "05b734ce-97cd-44ca-95d8-63691b0848a8.mp4",
+      "mediaType": "video",
+      "mimeType": "video/mp4",
+      "url": "http://10.125.9.206:3001/uploads/05b734ce-97cd-44ca-95d8-63691b0848a8.mp4",
+      "size": 17048545,
+      "uploadedAt": "2026-11-08T05:50:07.268Z",
+      "durationSeconds": 87.104
+    },
+    {
+      "id": "bd50e598-34e0-48e7-b60c-4ccbd4a0d54a",
+      "filename": "713bb0bb-61e8-4ce6-8ec5-37b07fdd677d.png",
+      "mediaType": "image",
+      "mimeType": "image/png",
+      "url": "http://10.125.9.206:3001/uploads/713bb0bb-61e8-4ce6-8ec5-37b07fdd677d.png",
+      "size": 1099725,
+      "uploadedAt": "2026-11-08T05:50:48.544Z",
+      "durationSeconds": null
+    },
+    {
+      "id": "ef159f26-94a8-4815-b4f4-3ccc7b1fbfab",
+      "filename": "e1c8e603-1bc9-403a-8e4a-e7b957f34fe3.mp4",
+      "mediaType": "video",
+      "mimeType": "video/mp4",
+      "url": "http://10.125.9.206:3001/uploads/e1c8e603-1bc9-403a-8e4a-e7b957f34fe3.mp4",
+      "size": 42686491,
+      "uploadedAt": "2026-11-08T05:52:29.444Z",
+      "durationSeconds": 213.011458
     }
   ],
   "uploadHistory": [
@@ -56,6 +86,30 @@
       "size": 1528916,
       "uploadedAt": "2026-11-04T12:50:54.110Z",
       "uploadStatus": "uploaded"
+    },
+    {
+      "id": "fa9c03fd-b264-4a93-8568-34e0fc292131",
+      "filename": "05b734ce-97cd-44ca-95d8-63691b0848a8.mp4",
+      "mediaType": "video",
+      "size": 17048545,
+      "uploadedAt": "2026-11-08T05:50:07.268Z",
+      "uploadStatus": "uploaded"
+    },
+    {
+      "id": "bd50e598-34e0-48e7-b60c-4ccbd4a0d54a",
+      "filename": "713bb0bb-61e8-4ce6-8ec5-37b07fdd677d.png",
+      "mediaType": "image",
+      "size": 1099725,
+      "uploadedAt": "2026-11-08T05:50:48.544Z",
+      "uploadStatus": "uploaded"
+    },
+    {
+      "id": "ef159f26-94a8-4815-b4f4-3ccc7b1fbfab",
+      "filename": "e1c8e603-1bc9-403a-8e4a-e7b957f34fe3.mp4",
+      "mediaType": "video",
+      "size": 42686491,
+      "uploadedAt": "2026-11-08T05:52:29.444Z",
+      "uploadStatus": "uploaded"
     }
   ],
   "playlists": [],
@@ -63,20 +117,20 @@
   "activeScheduleId": null,
   "currentContent": {
     "contentType": "video",
-    "videoUrl": "http://10.240.248.206:3001/uploads/494c5ff6-fe19-42eb-9b5b-a3c5f66f8d23.mp4",
-    "updateId": "f7b695a3-eb8b-4375-939e-05f4f02c59d3",
-    "mediaId": "6fdccfc4-be4d-4cc7-96ca-f3d2db685d64",
+    "videoUrl": "http://10.125.9.206:3001/uploads/e1c8e603-1bc9-403a-8e4a-e7b957f34fe3.mp4",
+    "updateId": "03354121-982b-4fc2-9ea5-62326bb224d3",
+    "mediaId": "ef159f26-94a8-4815-b4f4-3ccc7b1fbfab",
     "durationSeconds": 213.011458,
     "transition": "none",
-    "transitionAt": 1794017372802
+    "transitionAt": 1794117162803
   },
   "playback": {
-    "status": "stopped",
-    "mediaId": "6fdccfc4-be4d-4cc7-96ca-f3d2db685d64",
-    "positionSeconds": 0,
-    "volume": 1,
-    "startedAt": null,
-    "timelineId": "74129212-8810-41df-a1bd-3f7522ca5958",
+    "status": "playing",
+    "mediaId": "ef159f26-94a8-4815-b4f4-3ccc7b1fbfab",
+    "positionSeconds": 270.527,
+    "volume": 0.17,
+    "startedAt": 1794117464508,
+    "timelineId": "3fa3cd70-2eea-4f0d-8e90-cbaaeede17fc",
     "playlistId": null,
     "playlistIndex": 0,
     "nextPlaylistIndex": null,

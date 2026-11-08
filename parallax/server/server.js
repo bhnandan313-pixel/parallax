@@ -81,6 +81,17 @@ function getForwardedHostname(request) {
     return request.hostname;
 }
 
+function getForwardedProtocol(request) {
+    const forwardedProto = request.get('x-forwarded-proto');
+    if (typeof forwardedProto === 'string' && forwardedProto.trim()) {
+        const protocol = forwardedProto.split(',')[0].trim().toLowerCase();
+        if (['http', 'https'].includes(protocol)) {
+            return protocol;
+        }
+    }
+    return request.protocol;
+}
+
 function isAllowedBrowserOrigin(origin, requestHostname) {
     let originUrl;
     try {
@@ -91,6 +102,14 @@ function isAllowedBrowserOrigin(origin, requestHostname) {
     if (!['http:', 'https:'].includes(originUrl.protocol)) {
         return false;
     }
+
+    const isTryCloudflareHostname = (hostname) =>
+        typeof hostname === 'string' && /(^|\.)trycloudflare\.com$/i.test(hostname);
+
+    if (isTryCloudflareHostname(originUrl.hostname)) {
+        return true;
+    }
+
     const port = Number(originUrl.port);
     const isVitePort = originUrl.port === '' || (port >= 5173 && port <= 5199);
     return isVitePort && (originUrl.hostname === requestHostname
@@ -1242,7 +1261,11 @@ export function createParallaxServer({
         if (publicBaseUrl) {
             baseUrl = new URL(publicBaseUrl);
         } else {
-            baseUrl = new URL(`${req.protocol}://${req.get('host')}`);
+            const forwardedHost = req.get('x-forwarded-host');
+            const publicHost = typeof forwardedHost === 'string' && forwardedHost.trim()
+                ? forwardedHost.split(',')[0].trim()
+                : req.get('host');
+            baseUrl = new URL(`${getForwardedProtocol(req)}://${publicHost}`);
             if (['localhost', '127.0.0.1', '::1'].includes(baseUrl.hostname)) {
                 const lanAddress = getPrivateLanAddress();
                 if (!lanAddress) {

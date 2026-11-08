@@ -113,7 +113,7 @@ test('removing a device does not change replacement IDs for remaining devices', 
 
 test('reports marker ID exhaustion', () => {
     const existingAssignments = Object.fromEntries(
-        Array.from({ length: 999 }, (_, index) => [`device-${index}`, index + 1])
+        Array.from({ length: 1023 }, (_, index) => [`device-${index}`, index + 1])
     );
     assert.throws(
         () => createPersistentMarkerAssignments([...Object.keys(existingAssignments), 'new-device'], existingAssignments),

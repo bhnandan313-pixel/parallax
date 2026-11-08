@@ -2129,6 +2129,52 @@ test('uploads MP4 once, synchronizes playback, manages playlists, and resumes sc
     }
 });
 
+test('accepts uploads from the Cloudflare tunnel origin', async () => {
+    const server = await startServer({ publicBaseUrl: null });
+    const controller = await connectClient(server.url);
+    try {
+        const controllerSession = await emitAck(controller, 'controller:register');
+        const imageBuffer = await sharp({
+            create: {
+                width: 2,
+                height: 2,
+                channels: 3,
+                background: { r: 75, g: 150, b: 220 }
+            }
+        }).png().toBuffer();
+        const formData = new FormData();
+        formData.append('image', new Blob([imageBuffer]), 'cloudflare-upload.png');
+
+        const cloudflareOrigin = 'https://featuring-liability-roll-rico.trycloudflare.com';
+        const response = await fetch(`${server.url}/api/upload`, {
+            method: 'POST',
+            headers: {
+                Origin: cloudflareOrigin,
+                Host: 'featuring-liability-roll-rico.trycloudflare.com',
+                'X-Forwarded-Host': 'featuring-liability-roll-rico.trycloudflare.com',
+                'X-Forwarded-Proto': 'https',
+                'X-Parallax-Controller': controllerSession.uploadToken
+            },
+            body: formData
+        });
+
+        assert.equal(response.status, 201);
+        assert.equal(response.headers.get('access-control-allow-origin'), cloudflareOrigin);
+        const upload = await response.json();
+        assert.equal(new URL(upload.imageUrl).origin, cloudflareOrigin);
+
+        const rangeResponse = await fetch(`${server.url}${new URL(upload.imageUrl).pathname}`, {
+            headers: { Range: 'bytes=0-15' }
+        });
+        assert.equal(rangeResponse.status, 206);
+        assert.equal(rangeResponse.headers.get('content-type'), 'image/png');
+        assert.match(rangeResponse.headers.get('content-range'), /^bytes 0-15\/\d+$/);
+    } finally {
+        controller.disconnect();
+        await server.close();
+    }
+});
+
 test('uses a LAN-reachable image URL when uploads arrive through localhost', async () => {
     const server = await startServer({ publicBaseUrl: null });
     const controller = await connectClient(server.url);
