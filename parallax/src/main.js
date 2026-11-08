@@ -12,10 +12,10 @@ import {
 } from './media/audio.js';
 import { isFullscreen, toggleFullscreen } from './media/fullscreen.js';
 import {
-    createArucoMarkerPattern,
     computeMarkerIdForDevice,
     detectMarkersFromImageData
 } from './vision/marker-detection.js';
+import { renderArucoMarker } from './vision/marker-renderer.js';
 import './styles/main.css';
 
 if (location.pathname === '/controller' || location.pathname === '/controller/') {
@@ -30,7 +30,6 @@ function createMarkerOverlay(deviceId, allocatedMarkerId = null) {
     const markerId = Number.isInteger(allocatedMarkerId)
         ? allocatedMarkerId
         : computeMarkerIdForDevice(deviceId);
-    const pattern = createArucoMarkerPattern(markerId);
     const overlay = document.createElement('div');
     overlay.className = 'parallax-vision-marker';
     overlay.setAttribute('aria-label', `Device marker ${markerId}`);
@@ -38,22 +37,7 @@ function createMarkerOverlay(deviceId, allocatedMarkerId = null) {
     canvas.className = 'parallax-vision-marker-grid';
     const moduleSize = 56;
     const quietZoneModules = 1;
-    canvas.width = (pattern.length + quietZoneModules * 2) * moduleSize;
-    canvas.height = (pattern.length + quietZoneModules * 2) * moduleSize;
-    const context = canvas.getContext('2d');
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    for (let row = 0; row < pattern.length; row += 1) {
-        for (let column = 0; column < pattern[row].length; column += 1) {
-            context.fillStyle = pattern[row][column] ? '#fff' : '#000';
-            context.fillRect(
-                (column + quietZoneModules) * moduleSize,
-                (row + quietZoneModules) * moduleSize,
-                moduleSize,
-                moduleSize
-            );
-        }
-    }
+    renderArucoMarker(canvas, markerId, { moduleSize, quietZoneModules });
     const label = document.createElement('span');
     label.className = 'parallax-vision-marker-label';
     label.textContent = `ID ${markerId}`;
@@ -79,7 +63,10 @@ function startVisionCamera() {
         markerStatus: 'Waiting for markers',
         processedFrames: 0,
         detectionCanvas: null,
-        lastError: ''
+        lastError: '',
+        lastSuccessfulDetectionAt: null,
+        registeredMarkers: [],
+        lastDiagnosticsLogAt: 0
     };
 
     app.innerHTML = `
@@ -104,10 +91,15 @@ function startVisionCamera() {
                     <p>Status: <strong data-vision-status-label>Waiting on permission</strong></p>
                     <p>Detected markers: <strong data-vision-detected>0</strong></p>
                     <p>Last update: <strong data-vision-updated>—</strong></p>
-                    <p>Camera: <strong data-vision-camera-status>Not started</strong></p>
+                    <p>Camera stream: <strong data-vision-camera-status>Not started</strong></p>
+                    <p>Frame dimensions: <strong data-vision-frame-dimensions>—</strong></p>
                     <p>Detection loop: <strong data-vision-loop-status>Stopped</strong></p>
                     <p>Frames processed: <strong data-vision-frame-count>0</strong></p>
-                    <p>Last marker ID: <strong data-vision-marker-id>None</strong></p>
+                    <p>Detected IDs: <strong data-vision-marker-id>None</strong></p>
+                    <p>Registered IDs: <strong data-vision-registered-ids>Waiting for report</strong></p>
+                    <p>Matched IDs: <strong data-vision-matched-ids>None</strong></p>
+                    <p>Unmatched IDs: <strong data-vision-unmatched-ids>None</strong></p>
+                    <p>Last successful detection: <strong data-vision-last-detection>Never</strong></p>
                     <p>Detection error: <strong data-vision-error>None</strong></p>
                 </div>
             </section>
@@ -123,7 +115,12 @@ function startVisionCamera() {
     const cameraStatusNode = app.querySelector('[data-vision-camera-status]');
     const loopStatusNode = app.querySelector('[data-vision-loop-status]');
     const frameCountNode = app.querySelector('[data-vision-frame-count]');
+    const frameDimensionsNode = app.querySelector('[data-vision-frame-dimensions]');
     const markerIdNode = app.querySelector('[data-vision-marker-id]');
+    const registeredMarkerIdsNode = app.querySelector('[data-vision-registered-ids]');
+    const matchedMarkerIdsNode = app.querySelector('[data-vision-matched-ids]');
+    const unmatchedMarkerIdsNode = app.querySelector('[data-vision-unmatched-ids]');
+    const lastDetectionNode = app.querySelector('[data-vision-last-detection]');
     const detectionErrorNode = app.querySelector('[data-vision-error]');
     const markerCanvas = app.querySelector('[data-vision-marker-overlay]');
     const cameraSelect = app.querySelector('[data-camera-source]');
@@ -205,12 +202,13 @@ function startVisionCamera() {
             activateDetectionLoop();
         } catch (error) {
             console.error('Unable to access the camera:', error);
+            cameraStatusNode.textContent = 'Unavailable';
             setStatus('Camera permission was denied or no camera is available.', 'Unavailable');
         }
     }
 
     function detectMarkersFromFrame() {
-        if (!video || video.readyState < 2 || !cameraState.mediaStream || cameraState.socket?.connected !== true) {
+        if (!video || video.readyState < 2 || !cameraState.mediaStream) {
             return;
         }
         const width = 320;
@@ -223,15 +221,17 @@ function startVisionCamera() {
         context.drawImage(video, 0, 0, width, height);
         let markers = [];
         try {
-            markers = detectMarkersFromImageData(context.getImageData(0, 0, width, height), {
+            const imageData = context.getImageData(0, 0, width, height);
+            cameraState.processedFrames += 1;
+            frameCountNode.textContent = String(cameraState.processedFrames);
+            frameDimensionsNode.textContent = `${video.videoWidth}x${video.videoHeight} -> ${width}x${height}`;
+            markers = detectMarkersFromImageData(imageData, {
                 minConfidence: 0.2,
                 onError: (error) => {
                     cameraState.lastError = error.message;
                     detectionErrorNode.textContent = error.message;
                 }
             });
-            cameraState.processedFrames += 1;
-            frameCountNode.textContent = String(cameraState.processedFrames);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             cameraState.lastError = message;
@@ -263,7 +263,17 @@ function startVisionCamera() {
         markerIdNode.textContent = markers.length
             ? markers.map((marker) => String(marker.id)).join(', ')
             : 'None';
+        if (markers.length > 0) {
+            cameraState.lastSuccessfulDetectionAt = Date.now();
+            lastDetectionNode.textContent = new Date(cameraState.lastSuccessfulDetectionAt).toLocaleTimeString();
+        }
         const payload = {
+            frame: {
+                width,
+                height,
+                sourceWidth: video.videoWidth || width,
+                sourceHeight: video.videoHeight || height
+            },
             markers: markers.map((marker) => ({
                 id: marker.id,
                 x: marker.normalizedCenter.x,
@@ -282,8 +292,43 @@ function startVisionCamera() {
         };
         if (cameraState.socket && cameraState.socket.connected && Date.now() - cameraState.lastMarkerReportAt > 250) {
             cameraState.lastMarkerReportAt = Date.now();
-            cameraState.socket.emit('vision:camera:report', payload);
-            updatedNode.textContent = new Date().toLocaleTimeString();
+            cameraState.socket.timeout(3000).emit('vision:camera:report', payload, (error, response) => {
+                if (error || !response?.ok) {
+                    cameraState.lastError = response?.message || error?.message || 'Observation transmission timed out';
+                    detectionErrorNode.textContent = cameraState.lastError;
+                    return;
+                }
+                cameraState.registeredMarkers = response.registeredMarkers ?? [];
+                registeredMarkerIdsNode.textContent = cameraState.registeredMarkers.length
+                    ? cameraState.registeredMarkers.map(({ markerId, deviceId }) => `${markerId} -> ${deviceId}`).join(', ')
+                    : 'None';
+                matchedMarkerIdsNode.textContent = response.matchedMarkerIds?.length
+                    ? response.matchedMarkerIds.map(({ markerId, deviceId }) => `${markerId} -> ${deviceId}`).join(', ')
+                    : 'None';
+                unmatchedMarkerIdsNode.textContent = response.unmatchedMarkerIds?.length
+                    ? response.unmatchedMarkerIds.join(', ')
+                    : 'None';
+                cameraState.lastError = '';
+                detectionErrorNode.textContent = 'None';
+                updatedNode.textContent = new Date().toLocaleTimeString();
+            });
+        }
+        if (Date.now() - cameraState.lastDiagnosticsLogAt >= 1000) {
+            cameraState.lastDiagnosticsLogAt = Date.now();
+            console.info('[Parallax Vision] Camera diagnostics', {
+                streamStatus: cameraStatusNode.textContent,
+                sourceFrame: `${video.videoWidth}x${video.videoHeight}`,
+                processedFrame: `${width}x${height}`,
+                framesProcessed: cameraState.processedFrames,
+                detectedMarkerCount: markers.length,
+                detectedMarkerIds: markers.map((marker) => marker.id),
+                registeredMarkerIds: cameraState.registeredMarkers,
+                matchedMarkerIds: matchedMarkerIdsNode.textContent,
+                unmatchedMarkerIds: unmatchedMarkerIdsNode.textContent,
+                lastSuccessfulDetectionAt: cameraState.lastSuccessfulDetectionAt
+                    ? new Date(cameraState.lastSuccessfulDetectionAt).toISOString()
+                    : null
+            });
         }
     }
 

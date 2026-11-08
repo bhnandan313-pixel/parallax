@@ -618,6 +618,7 @@ export function mountController() {
     let totalScreens = 2;
     let assignmentMode = 'automatic';
     let registeredDevices = [];
+    let visionObservationCache = [];
     let panoramaImageUrl = null;
     let panoramaMediaType = 'image';
     let displayLayout = createDefaultLayout(2);
@@ -2244,6 +2245,9 @@ export function mountController() {
     function setDevices(devices) {
         markServerCommunication();
         registeredDevices = Array.isArray(devices) ? devices : [];
+        if (visionSpatialPreview) {
+            renderVisionObservations(visionObservationCache);
+        }
         renderAudioControls();
         const connectedDevices = registeredDevices.filter((device) =>
             device.connected && device.enabled !== false);
@@ -2365,7 +2369,25 @@ export function mountController() {
         }
         visionObservations.replaceChildren();
         visionSpatialPreview.replaceChildren();
-        for (const observation of observations) {
+        const observedByDevice = new Map((Array.isArray(observations) ? observations : [])
+            .filter((observation) => observation?.deviceId)
+            .map((observation) => [observation.deviceId, observation]));
+        const renderedObservations = [...(Array.isArray(observations) ? observations : [])];
+        for (const device of registeredDevices) {
+            if (!observedByDevice.has(device.id)) {
+                renderedObservations.push({
+                    id: device.markerId ?? 0,
+                    deviceId: device.id,
+                    deviceName: device.name || device.id,
+                    relativeX: 0.5,
+                    relativeY: 0.5,
+                    rotation: 0,
+                    confidence: 0,
+                    trackingState: 'missing'
+                });
+            }
+        }
+        for (const observation of renderedObservations) {
             const registered = registeredDevices.find((device) => device.id === observation.deviceId);
             const name = registered?.name || observation.deviceName || observation.deviceId || 'Unknown device';
             const row = document.createElement('div');
@@ -2377,11 +2399,19 @@ export function mountController() {
                 <span>Relative ${Number(observation.relativeX ?? observation.x ?? 0).toFixed(3)}, ${Number(observation.relativeY ?? observation.y ?? 0).toFixed(3)}</span>
                 <span>Rotation ${(Number(observation.rotation ?? 0) * 180 / Math.PI).toFixed(1)}°</span>
                 <span>${escapeHtml(observation.trackingState || observation.status || 'tracked')} · ${Math.round(Number(observation.confidence ?? 0) * 100)}%</span>
+                <span>Last detection: ${escapeHtml(observation.trackingState === 'missing'
+                    ? 'Not observed'
+                    : Number.isFinite(Number(observation.timestamp))
+                        ? new Date(Number(observation.timestamp)).toLocaleTimeString()
+                        : 'Unknown')}</span>
             `;
             visionObservations.append(row);
 
             const dot = document.createElement('span');
-            dot.className = `vision-spatial-point is-${observation.trackingState === 'lost' ? 'lost' : 'tracked'}`;
+            const trackingState = observation.trackingState === 'lost' || observation.trackingState === 'missing'
+                ? observation.trackingState
+                : 'tracked';
+            dot.className = `vision-spatial-point is-${trackingState}`;
             dot.style.left = `${Math.max(2, Math.min(98, Number(observation.relativeX ?? observation.x ?? 0) * 100))}%`;
             dot.style.top = `${Math.max(2, Math.min(98, Number(observation.relativeY ?? observation.y ?? 0) * 100))}%`;
             dot.title = `${name} · marker ${observation.id}`;
@@ -3283,6 +3313,7 @@ export function mountController() {
     });
     socket.on('vision:camera:update', (payload) => {
         const markers = Array.isArray(payload?.markers) ? payload.markers : [];
+        visionObservationCache = markers;
         if (markers.length === 0) {
             renderVisionObservations([]);
             setVisionStatus('Vision camera is connected but waiting for markers.');

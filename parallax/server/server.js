@@ -1099,7 +1099,8 @@ export function createParallaxServer({
         };
     }
 
-    function setVisionMarkerMode(enabled) {
+    function setVisionMarkerMode() {
+        const enabled = visionSessions.size > 0;
         for (const device of devices.values()) {
             if (!device.socketId) {
                 continue;
@@ -1116,6 +1117,7 @@ export function createParallaxServer({
         if (!target) {
             return;
         }
+        target.emit('vision:marker-mode', { enabled: visionSessions.size > 0 });
         if (device.screen === null) {
             target.emit('device:unassigned', getDeviceConfiguration(device));
             return;
@@ -1741,7 +1743,7 @@ export function createParallaxServer({
                 status: 'waiting',
                 tracker: createVisionTrackerState()
             });
-            setVisionMarkerMode(true);
+            setVisionMarkerMode();
             respond({
                 ok: true,
                 token,
@@ -1799,19 +1801,38 @@ export function createParallaxServer({
             const markers = Array.isArray(request?.markers) ? request.markers : [];
             const validMarkers = markers
                 .filter((marker) => marker && typeof marker === 'object')
-                .map((marker) => ({
-                    id: Number(marker.id),
-                    x: Number(marker.x),
-                    y: Number(marker.y),
-                    rotation: Number(marker.rotation),
-                    confidence: Number(marker.confidence),
-                    visible: Boolean(marker.visible),
-                    timestamp: Number(marker.timestamp) || Date.now(),
-                    deviceId: typeof marker.deviceId === 'string' ? marker.deviceId : null
-                }))
+                .map((marker) => {
+                    const normalized = marker.normalizedCenter && typeof marker.normalizedCenter === 'object'
+                        ? marker.normalizedCenter
+                        : null;
+                    const x = normalized ? Number(normalized.x) : Number(marker.x);
+                    const y = normalized ? Number(normalized.y) : Number(marker.y);
+                    return {
+                        id: Number(marker.id),
+                        x,
+                        y,
+                        normalizedCenter: { x, y },
+                        corners: Array.isArray(marker.corners)
+                            ? marker.corners.map((corner) => ({
+                                x: Number(corner?.x),
+                                y: Number(corner?.y)
+                            }))
+                            : [],
+                        rotation: Number(marker.rotation),
+                        confidence: Number(marker.confidence),
+                        visible: Boolean(marker.visible),
+                        timestamp: Number(marker.timestamp) || Date.now(),
+                        deviceId: typeof marker.deviceId === 'string' ? marker.deviceId : null
+                    };
+                })
                 .filter((marker) => Number.isFinite(marker.id)
+                    && marker.id >= 0
                     && Number.isFinite(marker.x)
+                    && marker.x >= 0
+                    && marker.x <= 1
                     && Number.isFinite(marker.y)
+                    && marker.y >= 0
+                    && marker.y <= 1
                     && Number.isFinite(marker.rotation)
                     && Number.isFinite(marker.confidence)
                     && marker.confidence >= 0
@@ -1857,8 +1878,26 @@ export function createParallaxServer({
                 markers: observations,
                 timestamp: Date.now()
             };
-            io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:update', payload);
-            respond({ ok: true, status: payload.status, markers: validMarkers.length });
+            const recipientSocket = io.sockets.sockets.get(session.controllerId);
+            recipientSocket?.emit('vision:camera:update', payload);
+            const matchedMarkerIds = associated.map((marker) => ({
+                markerId: marker.id,
+                deviceId: marker.deviceId
+            }));
+            const matchedIds = new Set(matchedMarkerIds.map(({ markerId }) => markerId));
+            respond({
+                ok: true,
+                status: payload.status,
+                markers: validMarkers.length,
+                registeredMarkers: associationDevices.map(({ id, markerId }) => ({
+                    deviceId: id,
+                    markerId
+                })),
+                matchedMarkerIds,
+                unmatchedMarkerIds: validMarkers
+                    .filter((marker) => !matchedIds.has(marker.id))
+                    .map((marker) => marker.id)
+            });
         });
 
         socket.on('vision:camera:disconnect', (request, acknowledge) => {
@@ -1965,6 +2004,7 @@ export function createParallaxServer({
             device.socketId = socket.id;
             device.playbackDiagnostics = null;
             socket.join(deviceRoom);
+            socket.emit('vision:marker-mode', { enabled: visionSessions.size > 0 });
 
             if (previousSocketId && previousSocketId !== socket.id) {
                 io.sockets.sockets.get(previousSocketId)?.disconnect(true);

@@ -1,6 +1,6 @@
 {
   "calibrationEnabled": false,
-  "totalScreens": 3,
+  "totalScreens": 2,
   "assignmentMode": "manual",
   "assignments": {
     "60f643f1-3382-40bb-8bda-52ba5f0bbc07": null,
@@ -21,7 +21,11 @@
     "0d5f513f-1c22-41bd-895e-4c180ef4f35e": null,
     "490dcf10-14c2-4c5c-bc9c-8e7299de54f1": null,
     "424925fb-b313-43d5-ad08-c4c6e5309e78": null,
-    "da5d79ce-ee62-47d5-9e4d-8eb428dd3cd7": null
+    "da5d79ce-ee62-47d5-9e4d-8eb428dd3cd7": null,
+    "02455cd1-8bed-4687-973d-6e26a5875a32": 2,
+    "c9507e99-06a6-422d-b515-9c96b010cbbb": 1,
+    "runtime-display-probe": null,
+    "vision-runtime-evidence": null
   },
   "markerAssignments": {
     "60f643f1-3382-40bb-8bda-52ba5f0bbc07": 463,
@@ -42,7 +46,11 @@
     "0d5f513f-1c22-41bd-895e-4c180ef4f35e": 443,
     "490dcf10-14c2-4c5c-bc9c-8e7299de54f1": 55,
     "424925fb-b313-43d5-ad08-c4c6e5309e78": 712,
-    "da5d79ce-ee62-47d5-9e4d-8eb428dd3cd7": 929
+    "da5d79ce-ee62-47d5-9e4d-8eb428dd3cd7": 929,
+    "02455cd1-8bed-4687-973d-6e26a5875a32": 143,
+    "c9507e99-06a6-422d-b515-9c96b010cbbb": 4,
+    "runtime-display-probe": 705,
+    "vision-runtime-evidence": 242
   },
   "screens": {
     "1": {
@@ -109,7 +117,7 @@
   "layout": {
     "type": "horizontal",
     "rows": 1,
-    "columns": 3,
+    "columns": 2,
     "screens": {
       "1": {
         "row": 0,
@@ -121,13 +129,6 @@
       "2": {
         "row": 0,
         "column": 1,
-        "rotation": 0,
-        "orientation": "auto",
-        "enabled": true
-      },
-      "3": {
-        "row": 0,
-        "column": 2,
         "rotation": 0,
         "orientation": "auto",
         "enabled": true

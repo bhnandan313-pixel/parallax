@@ -342,12 +342,12 @@ export function associateMarkerWithDevice(marker, registeredDevices) {
         return null;
     }
     return {
+        ...marker,
         markerId,
         deviceId: matchedDevice.id,
         deviceName: typeof matchedDevice.name === 'string' && matchedDevice.name.trim()
             ? matchedDevice.name.trim()
-            : matchedDevice.id,
-        ...marker
+            : matchedDevice.id
     };
 }
 

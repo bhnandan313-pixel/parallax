@@ -169,6 +169,22 @@ test('creates and validates temporary vision camera sessions', async () => {
         assert.match(createSession.url, /^\/vision\?/);
         assert.equal(typeof createSession.token, 'string');
 
+        const lateDisplay = await connectClient(server.url);
+        clients.push(lateDisplay);
+        const lateDisplayMode = new Promise((resolve) => {
+            lateDisplay.once('vision:marker-mode', resolve);
+        });
+        const lateDisplayAssignment = new Promise((resolve) => {
+            lateDisplay.once('device:assigned', resolve);
+        });
+        lateDisplay.emit('device:register', 'vision-display-late');
+        const [lateAssignment, markerMode] = await Promise.all([
+            lateDisplayAssignment,
+            lateDisplayMode
+        ]);
+        assert.equal(lateAssignment.markerId, computeMarkerIdForDevice('vision-display-late'));
+        assert.deepEqual(markerMode, { enabled: true });
+
         const camera = await connectClient(server.url);
         clients.push(camera);
         const joinedSession = await new Promise((resolve) => {
@@ -180,27 +196,56 @@ test('creates and validates temporary vision camera sessions', async () => {
             status: 'connected'
         });
 
-        const state = await new Promise((resolve) => {
-            const onUpdate = (payload) => {
-                controller.off('vision:camera:update', onUpdate);
-                resolve(payload);
-            };
-            controller.on('vision:camera:update', onUpdate);
+        let latestState;
+        for (const [x, y, rotation] of [[0.25, 0.5, 0.1], [0.55, 0.35, 0.4]]) {
+            latestState = await new Promise((resolve) => {
+                const onUpdate = (payload) => {
+                    controller.off('vision:camera:update', onUpdate);
+                    resolve(payload);
+                };
+                controller.on('vision:camera:update', onUpdate);
+                camera.emit('vision:camera:report', {
+                    frame: { width: 320, height: 240, sourceWidth: 1280, sourceHeight: 720 },
+                    markers: [{
+                        id: computeMarkerIdForDevice('vision-display-test'),
+                        x,
+                        y,
+                        normalizedCenter: { x, y },
+                        rotation,
+                        confidence: 0.9,
+                        visible: true,
+                        timestamp: Date.now(),
+                        deviceId: 'vision-display-test'
+                    }]
+                });
+            });
+        }
+        assert.equal(latestState.status, 'tracking');
+        assert.equal(latestState.markers[0].id, computeMarkerIdForDevice('vision-display-test'));
+        assert.ok(latestState.markers[0].relativeX > 0.25);
+        assert.ok(latestState.markers[0].relativeY < 0.5);
+        assert.ok(latestState.markers[0].timestamp <= Date.now());
+
+        const reportDiagnostics = await new Promise((resolve) => {
             camera.emit('vision:camera:report', {
                 markers: [{
                     id: computeMarkerIdForDevice('vision-display-test'),
-                    x: 0.25,
-                    y: 0.5,
-                    rotation: 0.1,
-                    confidence: 0.9,
-                    visible: true,
-                    timestamp: Date.now(),
-                    deviceId: 'vision-display-test'
+                    x: 0.55,
+                    y: 0.35,
+                    rotation: 0.4,
+                    confidence: 0.9
                 }]
-            });
+            }, resolve);
         });
-        assert.equal(state.status, 'tracking');
-        assert.equal(state.markers[0].id, computeMarkerIdForDevice('vision-display-test'));
+        assert.deepEqual(
+            reportDiagnostics.registeredMarkers.map(({ deviceId }) => deviceId).sort(),
+            ['vision-display-late', 'vision-display-test']
+        );
+        assert.deepEqual(reportDiagnostics.matchedMarkerIds, [{
+            markerId: computeMarkerIdForDevice('vision-display-test'),
+            deviceId: 'vision-display-test'
+        }]);
+        assert.deepEqual(reportDiagnostics.unmatchedMarkerIds, []);
 
         const invalid = await new Promise((resolve) => {
             camera.emit('vision:camera:join', { token: 'not-a-real-token' }, resolve);

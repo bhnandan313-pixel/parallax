@@ -711,7 +711,8 @@ body.controller-page #app {
     box-shadow: 0 0 12px rgba(74, 222, 128, 0.9);
 }
 
-.vision-spatial-point.is-lost {
+.vision-spatial-point.is-lost,
+.vision-spatial-point.is-missing {
     background: #f87171;
 }
 

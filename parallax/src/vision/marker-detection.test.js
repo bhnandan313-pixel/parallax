@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import jsAruco from 'js-aruco';
+import sharp from 'sharp';
 import test from 'node:test';
 import {
     associateMarkerWithDevice,
@@ -15,6 +16,7 @@ import {
     validateMarkerObservation,
     validateVisionCalibration
 } from './marker-detection.js';
+import { renderArucoMarker } from './marker-renderer.js';
 
 const { AR } = jsAruco;
 
@@ -55,6 +57,30 @@ function createSyntheticMarkerImage(markerDefinitions, width = 640, height = 480
 function detectSyntheticMarkers(markerDefinitions) {
     const detector = new AR.Detector();
     return detector.detect(createSyntheticMarkerImage(markerDefinitions));
+}
+
+function createRasterCanvas() {
+    const canvas = { width: 0, height: 0 };
+    const context = {
+        fillStyle: '#000',
+        fillRect(left, top, width, height) {
+            if (!canvas.data) {
+                canvas.data = new Uint8ClampedArray(canvas.width * canvas.height * 4);
+            }
+            const value = this.fillStyle === '#fff' ? 255 : 0;
+            for (let y = top; y < top + height; y += 1) {
+                for (let x = left; x < left + width; x += 1) {
+                    const offset = (y * canvas.width + x) * 4;
+                    canvas.data[offset] = value;
+                    canvas.data[offset + 1] = value;
+                    canvas.data[offset + 2] = value;
+                    canvas.data[offset + 3] = 255;
+                }
+            }
+        }
+    };
+    canvas.getContext = () => context;
+    return canvas;
 }
 
 test('creates a default calibration profile and validates practical marker sizes', () => {
@@ -119,6 +145,43 @@ test('reports marker ID exhaustion', () => {
         () => createPersistentMarkerAssignments([...Object.keys(existingAssignments), 'new-device'], existingAssignments),
         /MARKER_ID_CAPACITY_EXHAUSTED/
     );
+});
+
+test('production-rendered markers decode after rotation, scaling, and JPEG compression', async () => {
+    for (const [id, markerPixels, rotation] of [
+        [1, 32, 0],
+        [463, 40, 90],
+        [1023, 56, 180],
+        [21, 64, 270]
+    ]) {
+        const canvas = createRasterCanvas();
+        assert.equal(renderArucoMarker(canvas, id, { moduleSize: 56, quietZoneModules: 1 }), true);
+        const compressedMarker = await sharp(canvas.data, {
+            raw: { width: canvas.width, height: canvas.height, channels: 4 }
+        })
+            .resize(markerPixels, markerPixels, { kernel: 'lanczos3' })
+            .rotate(rotation)
+            .jpeg({ quality: 72 })
+            .toBuffer();
+        const left = Math.floor((320 - markerPixels) / 2);
+        const top = Math.floor((240 - markerPixels) / 2);
+        const scene = await sharp({
+            create: { width: 320, height: 240, channels: 3, background: '#fff' }
+        })
+            .composite([{ input: compressedMarker, left, top }])
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true });
+        const detected = detectMarkersFromImageData({
+            width: scene.info.width,
+            height: scene.info.height,
+            data: scene.data
+        });
+        assert.deepEqual(detected.map((marker) => marker.id), [id], `marker ${id}`);
+        assert.equal(detected[0].corners.length, 4);
+        assert.ok(detected[0].normalizedCenter.x > 0.4 && detected[0].normalizedCenter.x < 0.6);
+        assert.ok(detected[0].normalizedCenter.y > 0.4 && detected[0].normalizedCenter.y < 0.6);
+    }
 });
 
 test('round-trips valid js-aruco IDs and decodes multiple synthetic markers', () => {
@@ -239,6 +302,16 @@ test('calculates relative side-by-side arrangement and ordering from observed ma
     assert.equal(arrangement.detectedCount, 2);
     assert.equal(arrangement.horizontalOffset, 220);
     assert.equal(Number.isFinite(arrangement.confidence), true);
+});
+
+test('preserves resolved device identity when camera sends a null placeholder', () => {
+    const markerId = computeMarkerIdForDevice('phone-one');
+    const associated = associateMarkerWithDevice(
+        { id: markerId, deviceId: null, x: 0.25, y: 0.5 },
+        [{ id: 'phone-one', name: 'Left Phone', markerId }]
+    );
+    assert.equal(associated.deviceId, 'phone-one');
+    assert.equal(associated.deviceName, 'Left Phone');
 });
 
 test('associates valid marker IDs to registered devices and rejects duplicates', () => {
