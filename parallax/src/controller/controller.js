@@ -8,6 +8,11 @@ import {
     isValidAlignmentSettings,
     validateDisplayLayout
 } from '../display/geometry.js';
+import {
+    calculateScreenSurfaceViewports,
+    createScreenSurfaceCalibration
+} from '../display/screen-surface-geometry.js';
+import { SHARED_ORIENTATION_MODES } from '../display/shared-orientation.js';
 import { expectedPlaybackPosition } from '../media/playback.js';
 import { synchronizePreviewVideo } from '../media/preview-sync.js';
 import { createAudioSettings, DEFAULT_AUDIO_SETTINGS } from '../media/audio.js';
@@ -115,9 +120,74 @@ export function mountController() {
                                 <h3>Spatial preview</h3>
                                 <span>Live tracking</span>
                             </div>
+                            <div class="vision-relationship-summary is-unknown" data-vision-relationship>
+                                <strong data-vision-classification>UNKNOWN</strong>
+                                <span data-vision-relationship-details>
+                                    Waiting for two reliable marker observations.
+                                </span>
+                            </div>
+                            <p class="vision-coordinate-note">
+                                Positions are normalized camera-image coordinates. Angles describe the marker in the camera image, not the physical screen orientation.
+                            </p>
                             <div class="vision-spatial-preview" data-vision-spatial-preview>
                                 <p class="dashboard-empty-state">No tracked markers.</p>
                             </div>
+                            <div class="vision-mapping-summary" data-vision-mapping-status aria-live="polite">
+                                UNKNOWN · Waiting for two fresh, confident observations.
+                            </div>
+                            <div class="vision-mapping-preview is-unknown" data-vision-mapping-preview>
+                                <p class="dashboard-empty-state">No valid marker-proxy mapping.</p>
+                            </div>
+                            <p class="vision-coordinate-note">
+                                Estimated shared frame only: tile dimensions proxy marker bounds (or an explicitly supplied display aspect ratio). It is not calibrated physical screen geometry and does not affect video rendering.
+                            </p>
+                            <section class="surface-calibration" aria-labelledby="surface-calibration-title">
+                                <h4 id="surface-calibration-title">Screen surface corner calibration</h4>
+                                <p class="vision-coordinate-note">
+                                    Keep the Vision Camera fixed and use its current reference frame. Manually confirm each phone's physical screen corners in normalized camera-image coordinates (0–1), ordered from the phone's top-left clockwise. Marker size is not used as screen size. Coordinates and aspect ratios remain perspective- and lens-distorted estimates, not physical measurements. Recalibrate both phones if the camera or arrangement changes.
+                                </p>
+                                <label class="surface-calibration-device">Display device
+                                    <select data-surface-device></select>
+                                </label>
+                                <button class="alignment-action" type="button" data-surface-start disabled>
+                                    Start / Recalibrate
+                                </button>
+                                <p class="surface-calibration-status" data-surface-status role="status" aria-live="polite">
+                                    Select an assigned display device to begin.
+                                </p>
+                                <div class="surface-calibration-editor" data-surface-editor hidden>
+                                    <div class="surface-corner-grid">
+                                        ${[
+                                            ['topLeft', 'Top-left'],
+                                            ['topRight', 'Top-right'],
+                                            ['bottomRight', 'Bottom-right'],
+                                            ['bottomLeft', 'Bottom-left']
+                                        ].map(([corner, label]) => `
+                                            <fieldset>
+                                                <legend>${label}</legend>
+                                                <label>X<input type="number" min="0" max="1" step="0.001"
+                                                    data-surface-corner="${corner}" data-surface-axis="x"></label>
+                                                <label>Y<input type="number" min="0" max="1" step="0.001"
+                                                    data-surface-corner="${corner}" data-surface-axis="y"></label>
+                                            </fieldset>
+                                        `).join('')}
+                                    </div>
+                                    <label class="surface-calibration-confidence">Manual confirmation confidence
+                                        <select data-surface-confidence>
+                                            <option value="0.6">Low · 60%</option>
+                                            <option value="0.75" selected>Medium · 75%</option>
+                                            <option value="0.9">High · 90%</option>
+                                            <option value="1">Certain · 100%</option>
+                                        </select>
+                                    </label>
+                                    <button class="alignment-action" type="button" data-surface-save disabled>
+                                        Confirm corners and save
+                                    </button>
+                                </div>
+                                <div class="surface-viewport-summary" data-surface-viewports>
+                                    UNKNOWN · Calibrate both assigned display devices.
+                                </div>
+                            </section>
                             <details class="management-disclosure">
                                 <summary>Observation details</summary>
                                 <div class="vision-observation-list" data-vision-observations></div>
@@ -157,28 +227,33 @@ export function mountController() {
                                     <option value="manual">Manual · calibration</option>
                                 </select>
                             </label>
-                            <p class="display-settings-note">
-                                Fit is calculated once for the combined wall. Manual calibration remains available.
-                            </p>
-                            <label class="display-setting-toggle is-unavailable" title="Vision tracking does not provide reliable display orientation.">
-                                <input type="checkbox" data-automatic-rotation disabled>
-                                <span>Automatic Rotation</span>
+                            <label class="display-setting-toggle">
+                                <input type="checkbox" data-adaptive-rendering-toggle>
+                                <span>Adaptive calibrated rendering</span>
                             </label>
-                            <p class="display-settings-note" data-wall-orientation>
-                                Wall orientation unavailable from current tracking data.
-                            </p>
-                            <div class="display-orientation-actions">
-                                <button class="alignment-action" type="button" data-manual-override>
-                                    Manual override
-                                </button>
-                                <button class="alignment-action" type="button" data-reset-to-automatic
-                                    title="Unavailable until a reliable shared wall-orientation signal is available." disabled>
-                                    Reset to Automatic
-                                </button>
-                            </div>
                             <p class="display-settings-note">
-                                Vision marker angle is camera-relative 2D data, not a reliable device orientation signal.
-                                Manual per-screen overrides remain available.
+                                When enabled with valid calibration, COVER, CONTAIN, and STRETCH apply to the shared camera-relative frame using a subdivided projective mesh. MANUAL or Screen Fill off preserves independent per-phone adjustments. This estimate is not physical geometry.
+                            </p>
+                            <p class="display-settings-note" data-adaptive-rendering-status
+                                aria-live="polite">Adaptive rendering is off; the selected fit mode is unchanged.</p>
+                            <label>Shared video orientation
+                                <select data-orientation-mode>
+                                    <option value="AUTO">AUTO · detect together</option>
+                                    <option value="LANDSCAPE">LANDSCAPE · force landscape</option>
+                                    <option value="PORTRAIT">PORTRAIT · force portrait</option>
+                                    <option value="MANUAL">MANUAL · use per-screen settings</option>
+                                </select>
+                            </label>
+                            <button class="alignment-action" type="button" data-manual-override>
+                                Open per-screen orientation settings
+                            </button>
+                            <p class="display-settings-note" data-wall-orientation aria-live="polite">
+                                Shared orientation status is waiting for device and spatial observations.
+                            </p>
+                            <p class="display-settings-note">
+                                Device orientation comes from each phone's Screen Orientation API or viewport fallback.
+                                Arrangement and marker-angle diagnostics are camera-image-relative; this is not physical 3D geometry.
+                                Shared rotation is applied only with valid adaptive viewports. MANUAL retains per-screen settings.
                             </p>
                         </div>
                         <details class="management-disclosure">
@@ -583,8 +658,13 @@ export function mountController() {
         </main>
     `;
 
-    root.querySelector('[data-settings-link]').addEventListener('click', () => {
-        root.querySelector('#settings').open = true;
+    root.querySelector('[data-settings-link]').addEventListener('click', (event) => {
+        event.preventDefault();
+        const settings = root.querySelector('#settings');
+        settings.open = !settings.open;
+        if (settings.open) {
+            settings.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
     });
 
     const fileInput = root.querySelector('[data-file-input]');
@@ -644,13 +724,27 @@ export function mountController() {
     const screenConfigSaveButton = root.querySelector('[data-screen-config-save]');
     const screenFillToggle = root.querySelector('[data-screen-fill-toggle]');
     const fitModeSelect = root.querySelector('[data-fit-mode]');
+    const adaptiveRenderingToggle = root.querySelector('[data-adaptive-rendering-toggle]');
+    const adaptiveRenderingStatus = root.querySelector('[data-adaptive-rendering-status]');
     const wallOrientationStatus = root.querySelector('[data-wall-orientation]');
-    const manualOverrideButton = root.querySelector('[data-manual-override]');
-    const resetToAutomaticButton = root.querySelector('[data-reset-to-automatic]');
+    const orientationModeSelect = root.querySelector('[data-orientation-mode]');
+    const manualOrientationButton = root.querySelector('[data-manual-override]');
     const visionConnectButton = root.querySelector('[data-vision-connect]');
     const visionStatusNode = root.querySelector('[data-vision-status]');
     const visionObservations = root.querySelector('[data-vision-observations]');
     const visionSpatialPreview = root.querySelector('[data-vision-spatial-preview]');
+    const visionRelationship = root.querySelector('[data-vision-relationship]');
+    const visionClassification = root.querySelector('[data-vision-classification]');
+    const visionRelationshipDetails = root.querySelector('[data-vision-relationship-details]');
+    const visionMappingStatus = root.querySelector('[data-vision-mapping-status]');
+    const visionMappingPreview = root.querySelector('[data-vision-mapping-preview]');
+    const surfaceDeviceSelect = root.querySelector('[data-surface-device]');
+    const surfaceStartButton = root.querySelector('[data-surface-start]');
+    const surfaceStatus = root.querySelector('[data-surface-status]');
+    const surfaceEditor = root.querySelector('[data-surface-editor]');
+    const surfaceConfidenceSelect = root.querySelector('[data-surface-confidence]');
+    const surfaceSaveButton = root.querySelector('[data-surface-save]');
+    const surfaceViewports = root.querySelector('[data-surface-viewports]');
     const alignmentGrid = root.querySelector('[data-alignment-grid]');
     const screenList = root.querySelector('[data-screen-list]');
     const deviceAssignmentList = root.querySelector('[data-device-assignment-list]');
@@ -703,10 +797,23 @@ export function mountController() {
     let calibrationEnabled = false;
     let totalScreens = 2;
     let assignmentMode = 'automatic';
-    let displaySettings = { screenFillEnabled: true, fitMode: 'cover' };
+    let displaySettings = {
+        screenFillEnabled: true,
+        fitMode: 'cover',
+        adaptiveRenderingEnabled: false,
+        orientationMode: 'MANUAL'
+    };
+    let adaptiveRenderingConfiguration = null;
+    let sharedOrientationConfiguration = null;
     let pendingDisplaySettings = null;
     let registeredDevices = [];
     let visionObservationCache = [];
+    let visionRelationshipCache = { classification: 'UNKNOWN' };
+    let visionSpatialMappingCache = null;
+    let visionSpatialMappingCurrent = false;
+    let surfaceCalibrationByDevice = {};
+    let surfaceViewportCache = null;
+    let surfaceCalibrationEditing = false;
     let panoramaImageUrl = null;
     let panoramaMediaType = 'image';
     let displayLayout = createDefaultLayout(2);
@@ -1413,6 +1520,104 @@ export function mountController() {
         });
     });
 
+    surfaceDeviceSelect?.addEventListener('change', () => {
+        surfaceCalibrationEditing = false;
+        if (surfaceEditor) {
+            surfaceEditor.hidden = true;
+        }
+        renderSurfaceCalibrationUI();
+    });
+    socket.on('screen-surface:calibration:capture', (capture) => {
+        if (typeof capture?.deviceId !== 'string'
+            || !Array.isArray(capture.corners)
+            || !registeredDevices.some((device) => device.id === capture.deviceId)) {
+            console.error('Received invalid screen-corner calibration capture:', capture);
+            return;
+        }
+        surfaceDeviceSelect.value = capture.deviceId;
+        surfaceCalibrationEditing = true;
+        surfaceEditor.hidden = false;
+        for (const [index, corner] of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'].entries()) {
+            const point = capture.corners[index];
+            for (const axis of ['x', 'y']) {
+                surfaceEditor.querySelector(
+                    `[data-surface-corner="${corner}"][data-surface-axis="${axis}"]`
+                ).value = Number.isFinite(Number(point?.[axis])) ? String(point[axis]) : '';
+            }
+        }
+        surfaceConfidenceSelect.value = '0.75';
+        updateSurfaceCalibrationValidity();
+        surfaceStatus.textContent = 'Captured from the Vision Camera. Review the four points, adjust manual confidence if needed, then save.';
+        surfaceStatus.classList.remove('is-error');
+    });
+    surfaceStartButton?.addEventListener('click', () => {
+        const calibration = surfaceCalibrationByDevice[surfaceDeviceSelect.value];
+        surfaceCalibrationEditing = true;
+        surfaceEditor.hidden = false;
+        for (const [index, corner] of ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'].entries()) {
+            const point = calibration?.corners?.[index];
+            for (const axis of ['x', 'y']) {
+                const input = surfaceEditor.querySelector(
+                    `[data-surface-corner="${corner}"][data-surface-axis="${axis}"]`
+                );
+                input.value = Number.isFinite(Number(point?.[axis])) ? String(point[axis]) : '';
+            }
+        }
+        surfaceConfidenceSelect.value = String(calibration?.confidence ?? 0.75);
+        updateSurfaceCalibrationValidity();
+        surfaceStatus.textContent = 'Requesting live Vision Camera corner capture. You can also enter normalized camera-image coordinates manually.';
+        surfaceStatus.classList.remove('is-error');
+        socket.timeout(5000).emit('screen-surface:calibration:start', {
+            deviceId: surfaceDeviceSelect.value
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                surfaceStatus.textContent = error
+                    ? 'Camera capture request was not acknowledged. Enter confirmed corner coordinates manually.'
+                    : response?.message || 'Camera capture is unavailable. Enter confirmed corner coordinates manually.';
+                surfaceStatus.classList.add('is-error');
+                return;
+            }
+            surfaceStatus.textContent = `On the Vision Camera, tap ${surfaceDeviceSelect.value}'s physical screen corners in top-left clockwise order.`;
+            surfaceStatus.classList.remove('is-error');
+        });
+    });
+    surfaceEditor?.addEventListener('input', updateSurfaceCalibrationValidity);
+    surfaceSaveButton?.addEventListener('click', () => {
+        const calibration = getSurfaceCalibrationCandidate();
+        if (!calibration || !surfaceDeviceSelect.value) {
+            updateSurfaceCalibrationValidity();
+            return;
+        }
+        surfaceSaveButton.disabled = true;
+        surfaceStatus.classList.remove('is-error');
+        surfaceStatus.textContent = 'Saving confirmed screen corners...';
+        socket.timeout(5000).emit('screen-surface:calibration:save', {
+            deviceId: surfaceDeviceSelect.value,
+            corners: calibration.corners.map(({ x, y }) => ({ x, y })),
+            confidence: calibration.confidence
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                surfaceSaveButton.disabled = false;
+                surfaceStatus.classList.add('is-error');
+                surfaceStatus.textContent = error
+                    ? 'Calibration save was not acknowledged.'
+                    : response?.message || 'Unable to save screen-surface calibration.';
+                console.error('Screen-surface calibration save failed:',
+                    error || response?.message);
+                return;
+            }
+            surfaceCalibrationByDevice = {
+                ...surfaceCalibrationByDevice,
+                [response.calibration.deviceId]: response.calibration
+            };
+            surfaceCalibrationEditing = false;
+            surfaceEditor.hidden = true;
+            surfaceStatus.classList.remove('is-error');
+            surfaceStatus.textContent = 'Confirmed screen corners saved. Recalibrate both devices if their arrangement or camera position changes.';
+            renderSurfaceCalibrationUI();
+        });
+    });
+
     fineAdjustmentInput.addEventListener('change', renderAlignmentUI);
 
     alignmentGrid.addEventListener('input', (event) => {
@@ -1446,18 +1651,94 @@ export function mountController() {
     function renderDisplaySettingsControls() {
         screenFillToggle.checked = displaySettings.screenFillEnabled;
         fitModeSelect.value = displaySettings.fitMode;
+        adaptiveRenderingToggle.checked = displaySettings.adaptiveRenderingEnabled;
+        orientationModeSelect.value = displaySettings.orientationMode;
         screenFillToggle.disabled = !socket.connected || pendingDisplaySettings !== null;
         fitModeSelect.disabled = !socket.connected || pendingDisplaySettings !== null
             || !displaySettings.screenFillEnabled;
-        resetToAutomaticButton.disabled = true;
-        resetToAutomaticButton.title =
-            'Unavailable until a reliable shared wall-orientation signal is available.';
-        manualOverrideButton.disabled = !socket.connected;
-        const layoutOrientation = displayLayout.columns >= displayLayout.rows
-            ? 'landscape layout'
-            : 'portrait layout';
+        adaptiveRenderingToggle.disabled = !socket.connected || pendingDisplaySettings !== null;
+        orientationModeSelect.disabled = !socket.connected || pendingDisplaySettings !== null;
+        manualOrientationButton.disabled = !socket.connected || pendingDisplaySettings !== null;
+        renderAdaptiveRenderingStatus();
+        renderSharedOrientationStatus();
+    }
+
+    function renderSharedOrientationStatus() {
+        const configuration = sharedOrientationConfiguration;
+        if (!configuration) {
+            wallOrientationStatus.textContent =
+                'Shared orientation status is waiting for device and spatial observations.';
+            return;
+        }
+        const devices = (configuration.devices ?? []).map((device) => {
+            const name = registeredDevices.find((entry) => entry.id === device.deviceId)?.name
+                || device.deviceId
+                || `Screen ${device.screen}`;
+            const stale = Number.isFinite(device.reportedAt)
+                && device.orientationFresh === false;
+            const state = stale
+                ? 'stale orientation report'
+                : device.orientation
+                ? `${device.orientation}${Number.isInteger(device.angle) ? ` ${device.angle}°` : ''}`
+                    + (device.source ? ` (${device.source.replaceAll('-', ' ')})` : '')
+                : 'orientation unavailable';
+            return `${name}: ${device.connected ? state : 'disconnected'}`;
+        }).join(' · ');
+        const orientation = configuration.orientation
+            ? configuration.orientation.toUpperCase()
+            : 'UNKNOWN';
+        const pending = configuration.pendingOrientation
+            ? ` · considering ${configuration.pendingOrientation.toUpperCase()}`
+            : '';
+        const arrangement = configuration.arrangement || 'UNKNOWN';
+        const reversed = configuration.reversed ? ' · reversed order' : '';
+        const markerAngle = Number.isFinite(configuration.relativeMarkerAngle)
+            ? ` · marker-angle delta ${(configuration.relativeMarkerAngle * 180 / Math.PI).toFixed(1)}° camera-relative`
+            : '';
+        const deviceAngle = Number.isFinite(configuration.relativeDeviceAngle)
+            ? ` · device angle delta ${configuration.relativeDeviceAngle}°`
+            : '';
+        const confidence = configuration.mode === 'AUTO'
+            && Number.isFinite(configuration.confidence)
+            ? ` · confidence ${Math.round(configuration.confidence * 100)}%`
+            : '';
+        const fallback = configuration.mode !== 'MANUAL' && !configuration.renderingActive
+            ? ` · rendering fallback: ${(configuration.renderingFallbackReason || 'adaptive rendering unavailable').replaceAll('-', ' ')}`
+            : '';
+        const reason = configuration.reason
+            ? ` · ${configuration.reason.replaceAll('-', ' ')}`
+            : '';
         wallOrientationStatus.textContent =
-            `Wall orientation: not detected · ${layoutOrientation} (${displayLayout.rows} × ${displayLayout.columns})`;
+            `${configuration.mode} · shared video ${orientation}${pending} · ${arrangement}${reversed}`
+            + `${confidence}${deviceAngle}${markerAngle}${fallback}${reason} · ${devices || 'No assigned devices'}`;
+    }
+
+    function renderAdaptiveRenderingStatus() {
+        if (!adaptiveRenderingStatus) {
+            return;
+        }
+        if (!adaptiveRenderingConfiguration) {
+            adaptiveRenderingStatus.textContent = displaySettings.adaptiveRenderingEnabled
+                ? 'Adaptive rendering requested; waiting for server calibration status.'
+                : 'Adaptive rendering is off; the selected fit mode is unchanged.';
+            return;
+        }
+        const configuration = adaptiveRenderingConfiguration;
+        const orientation = configuration.orientation && configuration.orientation !== 'UNKNOWN'
+            ? ` · ${configuration.orientation}`
+            : '';
+        const reversed = configuration.reversedFromDeviceIdOrder
+            ? ' · reversed device-ID order'
+            : '';
+        const status = configuration.active
+            ? `ACTIVE · ${configuration.arrangement}${orientation}${reversed}`
+            : `FALLBACK · ${(configuration.reason || 'unknown reason').replaceAll('-', ' ')}`;
+        const confidence = Number.isFinite(configuration.confidence)
+            ? ` · ${Math.round(configuration.confidence * 100)}% corner confidence`
+            : '';
+        adaptiveRenderingStatus.textContent = `${status} · rendering configuration v${configuration.version}`
+            + `${confidence} · camera-relative estimate, not physical geometry.`;
+        renderSharedOrientationStatus();
     }
 
     function saveDisplaySettings(nextSettings) {
@@ -1502,7 +1783,11 @@ export function mountController() {
                 screenFillEnabled: configuration.screenFillEnabled !== false,
                 fitMode: FIT_MODES.includes(configuration.fitMode)
                     ? configuration.fitMode
-                    : 'cover'
+                    : 'cover',
+                adaptiveRenderingEnabled: configuration.adaptiveRenderingEnabled === true,
+                orientationMode: SHARED_ORIENTATION_MODES.includes(configuration.orientationMode)
+                    ? configuration.orientationMode
+                    : 'MANUAL'
             };
         }
         renderDisplaySettingsControls();
@@ -1562,7 +1847,16 @@ export function mountController() {
     fitModeSelect.addEventListener('change', () => {
         saveDisplaySettings({ fitMode: fitModeSelect.value });
     });
-    manualOverrideButton.addEventListener('click', () => {
+    adaptiveRenderingToggle.addEventListener('change', () => {
+        saveDisplaySettings({ adaptiveRenderingEnabled: adaptiveRenderingToggle.checked });
+    });
+    orientationModeSelect.addEventListener('change', () => {
+        saveDisplaySettings({ orientationMode: orientationModeSelect.value });
+    });
+    manualOrientationButton.addEventListener('click', () => {
+        if (displaySettings.orientationMode !== 'MANUAL') {
+            saveDisplaySettings({ orientationMode: 'MANUAL' });
+        }
         const screenSettings = [...dashboardWall.querySelectorAll('.screen-options')];
         screenSettings.forEach((details) => {
             details.open = true;
@@ -2420,6 +2714,7 @@ export function mountController() {
     function setDevices(devices) {
         markServerCommunication();
         registeredDevices = Array.isArray(devices) ? devices : [];
+        renderSurfaceCalibrationUI();
         if (visionSpatialPreview) {
             renderVisionObservations(visionObservationCache);
         }
@@ -2538,9 +2833,32 @@ export function mountController() {
         });
     }
 
-    function renderVisionObservations(observations) {
+    function renderVisionObservations(observations, relationship = visionRelationshipCache) {
         if (!visionObservations || !visionSpatialPreview) {
             return;
+        }
+        const classification = relationship?.classification || 'UNKNOWN';
+        visionClassification.textContent = classification;
+        visionRelationship.className = `vision-relationship-summary is-${classification.toLowerCase()}`;
+        if (!relationship?.isReliable) {
+            visionRelationshipDetails.textContent = relationship?.reason === 'missing-or-low-confidence-observation'
+                ? 'UNKNOWN · Both devices need fresh, confident observations.'
+                : relationship?.reason === 'two-devices-required'
+                    ? 'UNKNOWN · Two registered display devices are required.'
+                    : 'UNKNOWN · Geometry is ambiguous or has not been stable long enough.';
+        } else {
+            const reversed = relationship.reversed ? ' · REVERSED registration order' : '';
+            const scale = Number.isFinite(relationship.markerScaleRatio)
+                ? ` · marker scale ratio ${relationship.markerScaleRatio.toFixed(2)}`
+                : '';
+            visionRelationshipDetails.textContent =
+                `${relationship.arrangement} · ${relationship.orientation} orientation${reversed}`
+                + ` · camera-image Δ (${relationship.relativeHorizontal.toFixed(3)}, ${relationship.relativeVertical.toFixed(3)})`
+                + ` · distance ${relationship.relativeDistance.toFixed(3)}`
+                + ` · bearing ${(relationship.relativeAngle * 180 / Math.PI).toFixed(1)}°`
+                + ` · orientation Δ ${(relationship.relativeOrientationAngle * 180 / Math.PI).toFixed(1)}°`
+                + `${scale} · ${relationship.movement.toLowerCase()}`
+                + ` · ${Math.round(relationship.confidence * 100)}% confidence`;
         }
         visionObservations.replaceChildren();
         visionSpatialPreview.replaceChildren();
@@ -2552,12 +2870,13 @@ export function mountController() {
             if (!observedByDevice.has(device.id)) {
                 renderedObservations.push({
                     id: device.markerId ?? 0,
+                    markerId: device.markerId ?? 0,
                     deviceId: device.id,
                     deviceName: device.name || device.id,
-                    relativeX: 0.5,
-                    relativeY: 0.5,
-                    rotation: 0,
+                    centerX: null,
+                    centerY: null,
                     confidence: 0,
+                    isVisible: false,
                     trackingState: 'missing'
                 });
             }
@@ -2565,41 +2884,209 @@ export function mountController() {
         for (const observation of renderedObservations) {
             const registered = registeredDevices.find((device) => device.id === observation.deviceId);
             const name = registered?.name || observation.deviceName || observation.deviceId || 'Unknown device';
+            const deviceId = observation.deviceId || 'Unknown ID';
+            const markerId = observation.markerId ?? observation.id;
+            const centerX = Number(observation.centerX ?? observation.relativeX ?? observation.x);
+            const centerY = Number(observation.centerY ?? observation.relativeY ?? observation.y);
+            const hasPosition = Number.isFinite(centerX) && Number.isFinite(centerY);
+            const orientationAngle = Number(observation.orientationAngle ?? observation.rotation ?? 0);
+            const trackingState = observation.trackingState || observation.status || 'tracked';
+            const visible = observation.isVisible ?? trackingState === 'tracked';
             const row = document.createElement('div');
             row.className = 'vision-observation';
             row.innerHTML = `
                 <strong>${escapeHtml(name)}</strong>
-                <span>${escapeHtml(observation.deviceId || 'Unknown ID')}</span>
-                <span>Marker ${escapeHtml(String(observation.id))}</span>
-                <span>Relative ${Number(observation.relativeX ?? observation.x ?? 0).toFixed(3)}, ${Number(observation.relativeY ?? observation.y ?? 0).toFixed(3)}</span>
-                <span>Rotation ${(Number(observation.rotation ?? 0) * 180 / Math.PI).toFixed(1)}°</span>
-                <span>${escapeHtml(observation.trackingState || observation.status || 'tracked')} · ${Math.round(Number(observation.confidence ?? 0) * 100)}%</span>
-                <span>Last detection: ${escapeHtml(observation.trackingState === 'missing'
-                    ? 'Not observed'
+                <span>Device ID: ${escapeHtml(deviceId)}</span>
+                <span>Marker ID: ${escapeHtml(String(markerId))}</span>
+                <span>Camera position: ${hasPosition
+                    ? `${centerX.toFixed(3)}, ${centerY.toFixed(3)}`
+                    : 'Not observed yet'}</span>
+                <span>Camera-image angle: ${(orientationAngle * 180 / Math.PI).toFixed(1)}°</span>
+                <span>Marker bounds: ${(Number(observation.width ?? 0) * 100).toFixed(1)}% × ${(Number(observation.height ?? 0) * 100).toFixed(1)}%</span>
+                <span>Visibility: ${visible ? 'Visible' : escapeHtml(trackingState)} · Confidence ${Math.round(Number(observation.confidence ?? 0) * 100)}%</span>
+                <span>Last detected: ${escapeHtml(trackingState === 'missing'
+                    ? 'Not observed yet'
                     : Number.isFinite(Number(observation.timestamp))
                         ? new Date(Number(observation.timestamp)).toLocaleTimeString()
                         : 'Unknown')}</span>
             `;
             visionObservations.append(row);
 
+            if (!hasPosition) {
+                continue;
+            }
             const dot = document.createElement('span');
-            const trackingState = observation.trackingState === 'lost' || observation.trackingState === 'missing'
-                ? observation.trackingState
-                : 'tracked';
             dot.className = `vision-spatial-point is-${trackingState}`;
-            dot.style.left = `${Math.max(2, Math.min(98, Number(observation.relativeX ?? observation.x ?? 0) * 100))}%`;
-            dot.style.top = `${Math.max(2, Math.min(98, Number(observation.relativeY ?? observation.y ?? 0) * 100))}%`;
-            dot.title = `${name} · marker ${observation.id}`;
+            dot.style.left = `${Math.max(2, Math.min(98, centerX * 100))}%`;
+            dot.style.top = `${Math.max(2, Math.min(98, centerY * 100))}%`;
+            dot.title = `${deviceId} · marker ${markerId} · ${(orientationAngle * 180 / Math.PI).toFixed(1)}° camera-image angle · ${Math.round(Number(observation.confidence ?? 0) * 100)}% confidence · ${visible ? 'visible' : trackingState}`;
             dot.setAttribute('aria-label',
-                `${registered?.screen ? `Screen ${registered.screen}` : name}, marker ${observation.id}, ${trackingState}`);
+                `${deviceId}, marker ${markerId}, camera position ${centerX.toFixed(3)}, ${centerY.toFixed(3)}, ${trackingState}`);
             const label = document.createElement('span');
             label.className = 'vision-spatial-label';
-            label.textContent = registered?.screen ? `Screen ${registered.screen}` : name;
+            label.textContent = `${deviceId} · M${markerId}`;
             dot.append(label);
             visionSpatialPreview.append(dot);
         }
-        if (observations.length === 0) {
+        if (renderedObservations.length === 0) {
             visionObservations.innerHTML = '<p class="dashboard-empty-state">No tracked markers.</p>';
+        }
+        renderSpatialMapping(visionSpatialMappingCache, visionSpatialMappingCurrent, observations);
+    }
+
+    function renderSpatialMapping(mapping, isCurrent, observations) {
+        if (!visionMappingStatus || !visionMappingPreview) {
+            return;
+        }
+        const hasMapping = mapping?.valid === true && mapping.devices?.length === 2;
+        visionMappingPreview.replaceChildren();
+        visionMappingPreview.classList.toggle('is-unknown', !isCurrent || !hasMapping);
+        if (!hasMapping) {
+            visionMappingStatus.textContent = 'UNKNOWN · Two reliable device observations are required.';
+            visionMappingPreview.innerHTML = '<p class="dashboard-empty-state">No valid marker-proxy mapping.</p>';
+            return;
+        }
+
+        const currentLabel = isCurrent
+            ? 'VALID · Current observations'
+            : 'UNKNOWN · Showing last valid mapping; current observations are unreliable';
+        visionMappingStatus.textContent =
+            `${currentLabel} · ${mapping.arrangement} · ${Math.round(mapping.confidence * 100)}% confidence`
+            + ` · relative camera-image rotation ${(mapping.relativeRotation * 180 / Math.PI).toFixed(1)}°`;
+        const observedByDevice = new Map((Array.isArray(observations) ? observations : [])
+            .filter((observation) => observation?.deviceId)
+            .map((observation) => [observation.deviceId, observation]));
+        for (const device of mapping.devices) {
+            const pose = device.sharedWallPose;
+            const observation = observedByDevice.get(device.deviceId);
+            const tile = document.createElement('div');
+            tile.className = 'vision-mapping-device';
+            tile.style.left = `${pose.x * 100}%`;
+            tile.style.top = `${pose.y * 100}%`;
+            tile.style.width = `${Math.max(3, pose.width * 100)}%`;
+            tile.style.height = `${Math.max(5, pose.height * 100)}%`;
+            tile.style.transform = `translate(-50%, -50%) rotate(${pose.rotation}rad)`;
+            tile.title = `${device.deviceId} · marker ${observation?.markerId ?? observation?.id ?? 'unknown'}`;
+            const identity = document.createElement('strong');
+            identity.textContent = device.deviceId;
+            const marker = document.createElement('span');
+            marker.textContent = `Marker ${observation?.markerId ?? observation?.id ?? 'unknown'}`;
+            const details = document.createElement('span');
+            details.textContent = `(${pose.x.toFixed(3)}, ${pose.y.toFixed(3)}) · ${(pose.rotation * 180 / Math.PI).toFixed(1)}°`;
+            const dimensions = document.createElement('span');
+            const estimated = device.estimatedDisplaySurface;
+            dimensions.textContent =
+                `${estimated.width.toFixed(3)} × ${estimated.height.toFixed(3)} proxy`
+                + ` · ${Math.round(device.cameraImagePose.confidence * 100)}%`
+                + ` · ${device.trackingState}`;
+            tile.append(identity, marker, details, dimensions);
+            visionMappingPreview.append(tile);
+        }
+    }
+
+    function getSurfaceCalibrationCandidate() {
+        const deviceId = surfaceDeviceSelect?.value;
+        const corners = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'].map((corner) => ({
+            x: Number(surfaceEditor?.querySelector(
+                `[data-surface-corner="${corner}"][data-surface-axis="x"]`
+            )?.value),
+            y: Number(surfaceEditor?.querySelector(
+                `[data-surface-corner="${corner}"][data-surface-axis="y"]`
+            )?.value)
+        }));
+        return createScreenSurfaceCalibration({
+            deviceId,
+            corners,
+            confidence: Number(surfaceConfidenceSelect?.value),
+            timestamp: Date.now()
+        });
+    }
+
+    function renderSurfaceViewports() {
+        if (!surfaceViewports) {
+            return;
+        }
+        const displays = registeredDevices
+            .filter((device) => Number.isInteger(device.screen) && device.screen !== null)
+            .sort((left, right) => left.screen - right.screen)
+            .slice(0, 2);
+        const calibrations = displays.map((device) => surfaceCalibrationByDevice[device.id])
+            .filter(Boolean);
+        surfaceViewportCache = calculateScreenSurfaceViewports(calibrations);
+        surfaceViewports.replaceChildren();
+        if (!surfaceViewportCache.valid) {
+            surfaceViewports.textContent = `UNKNOWN · ${surfaceViewportCache.reason
+                .replaceAll('-', ' ')}.`;
+            return;
+        }
+        const heading = document.createElement('strong');
+        heading.textContent = `Camera-relative viewport frame · ${surfaceViewportCache.arrangement}`
+            + ` · ${Math.round(surfaceViewportCache.confidence * 100)}% manual confidence`;
+        surfaceViewports.append(heading);
+        for (const viewport of surfaceViewportCache.viewports) {
+            const row = document.createElement('span');
+            row.textContent = `${viewport.deviceId} · center (${viewport.center.x.toFixed(3)}, ${viewport.center.y.toFixed(3)})`
+                + ` · size ${viewport.width.toFixed(3)} × ${viewport.height.toFixed(3)} normalized`
+                + ` · aspect ${viewport.aspectRatio.toFixed(3)}`
+                + ` · rotation ${(viewport.rotation * 180 / Math.PI).toFixed(1)}°`;
+            surfaceViewports.append(row);
+        }
+    }
+
+    function renderSurfaceCalibrationUI() {
+        if (!surfaceDeviceSelect || !surfaceStartButton) {
+            return;
+        }
+        const displays = registeredDevices
+            .filter((device) => Number.isInteger(device.screen) && device.screen !== null)
+            .sort((left, right) => left.screen - right.screen);
+        const selectedId = surfaceDeviceSelect.value;
+        surfaceDeviceSelect.replaceChildren();
+        for (const device of displays) {
+            const option = document.createElement('option');
+            option.value = device.id;
+            option.textContent = `Screen ${device.screen} · ${device.id}`;
+            surfaceDeviceSelect.append(option);
+        }
+        if (displays.some((device) => device.id === selectedId)) {
+            surfaceDeviceSelect.value = selectedId;
+        }
+        surfaceDeviceSelect.disabled = displays.length === 0;
+        surfaceStartButton.disabled = !socket.connected || displays.length === 0;
+        const calibration = surfaceCalibrationByDevice[surfaceDeviceSelect.value];
+        if (!surfaceCalibrationEditing && surfaceStatus) {
+            if (calibration) {
+                const age = Date.now() - Number(calibration.timestamp);
+                surfaceStatus.textContent = age > 24 * 60 * 60 * 1000
+                    ? 'Saved calibration is stale. Recalibrate this phone and the other phone.'
+                    : `Saved manual corners · ${new Date(calibration.timestamp).toLocaleString()}`
+                        + ` · ${Math.round(calibration.confidence * 100)}% confidence.`;
+            } else {
+                surfaceStatus.textContent = displays.length
+                    ? 'No saved screen-surface calibration for this device.'
+                    : 'Connect and assign a display device to begin.';
+            }
+        }
+        if (!surfaceCalibrationEditing && surfaceEditor) {
+            surfaceEditor.hidden = true;
+        }
+        renderSurfaceViewports();
+        if (surfaceCalibrationEditing) {
+            updateSurfaceCalibrationValidity();
+        }
+    }
+
+    function updateSurfaceCalibrationValidity() {
+        const candidate = getSurfaceCalibrationCandidate();
+        if (surfaceSaveButton) {
+            surfaceSaveButton.disabled = !socket.connected || !surfaceCalibrationEditing || !candidate;
+        }
+        if (surfaceStatus && surfaceCalibrationEditing) {
+            surfaceStatus.classList.toggle('is-error', !candidate);
+            surfaceStatus.textContent = candidate
+                ? `Valid four-corner surface · ${candidate.width.toFixed(3)} × ${candidate.height.toFixed(3)} normalized camera-image units`
+                    + ` · angle ${(candidate.rotation * 180 / Math.PI).toFixed(1)}°`
+                : 'Enter four in-frame corners in top-left, top-right, bottom-right, bottom-left order. The quad must be convex and non-degenerate.';
         }
     }
 
@@ -3456,6 +3943,8 @@ export function mountController() {
         renderDisplaySettingsControls();
         addDeviceButton.disabled = true;
         visionConnectButton.disabled = true;
+        surfaceStartButton.disabled = true;
+        surfaceSaveButton.disabled = true;
         playbackVolume.disabled = true;
         playbackMuteButton.disabled = true;
         publishButton.disabled = true;
@@ -3487,9 +3976,33 @@ export function mountController() {
     });
     socket.on('devices:update', setDevices);
     socket.on('diagnostics:update', setDiagnostics);
+    socket.on('screen-surface:calibrations:current', (state) => {
+        surfaceCalibrationByDevice = state?.calibrations
+            && typeof state.calibrations === 'object'
+            && !Array.isArray(state.calibrations)
+            ? state.calibrations
+            : {};
+        renderSurfaceCalibrationUI();
+    });
     socket.on('vision:camera:status', (event) => {
         if (!event?.connected) {
-            setVisionStatus('Vision camera disconnected.');
+            visionObservationCache = visionObservationCache.map((observation) => ({
+                ...observation,
+                isVisible: false,
+                visible: false,
+                status: 'lost',
+                trackingState: 'lost'
+            }));
+            visionRelationshipCache = {
+                classification: 'UNKNOWN',
+                isReliable: false,
+                reason: 'missing-or-low-confidence-observation'
+            };
+            visionSpatialMappingCurrent = false;
+            renderVisionObservations(visionObservationCache, visionRelationshipCache);
+            setVisionStatus(visionObservationCache.length > 0
+                ? 'Vision camera disconnected; showing last-known positions.'
+                : 'Vision camera disconnected.');
             return;
         }
         setVisionStatus(`Vision camera connected (${event.status || 'tracking'}).`);
@@ -3497,13 +4010,25 @@ export function mountController() {
     socket.on('vision:camera:update', (payload) => {
         const markers = Array.isArray(payload?.markers) ? payload.markers : [];
         visionObservationCache = markers;
-        if (markers.length === 0) {
-            renderVisionObservations([]);
-            setVisionStatus('Vision camera is connected but waiting for markers.');
+        visionRelationshipCache = payload?.relationship ?? { classification: 'UNKNOWN' };
+        const mappingAge = Date.now() - Number(payload?.spatialMapping?.timestamp);
+        visionSpatialMappingCurrent = payload?.spatialMappingValid === true
+            && payload?.spatialMapping?.valid === true
+            && Number.isFinite(mappingAge)
+            && mappingAge >= 0
+            && mappingAge <= 2000;
+        if (payload?.spatialMapping?.valid === true && visionSpatialMappingCurrent) {
+            visionSpatialMappingCache = payload.spatialMapping;
+        }
+        renderVisionObservations(markers, visionRelationshipCache);
+        const visibleMarkers = markers.filter((marker) => marker.isVisible !== false);
+        if (visibleMarkers.length === 0) {
+            setVisionStatus(markers.length > 0
+                ? 'No markers currently visible; showing last-known positions.'
+                : 'Vision camera is connected but waiting for markers.');
             return;
         }
-        renderVisionObservations(markers);
-        const deviceSummary = markers.map((marker) =>
+        const deviceSummary = visibleMarkers.map((marker) =>
             marker.deviceName || marker.deviceId || `marker ${marker.id}`).join(', ');
         setVisionStatus(`Markers detected: ${deviceSummary}`);
     });
@@ -3519,6 +4044,32 @@ export function mountController() {
     });
     socket.on('screen-config:current', applyScreenConfiguration);
     socket.on('screen-config:update', applyScreenConfiguration);
+    socket.on('adaptive-rendering:current', (configuration) => {
+        adaptiveRenderingConfiguration = configuration;
+        renderAdaptiveRenderingStatus();
+    });
+    socket.on('adaptive-rendering:update', (configuration) => {
+        adaptiveRenderingConfiguration = configuration;
+        renderAdaptiveRenderingStatus();
+    });
+    socket.on('shared-orientation:current', (configuration) => {
+        sharedOrientationConfiguration = configuration;
+        console.info('[Orientation] Controller received current status', {
+            version: configuration.version,
+            devices: configuration.devices?.map(({ deviceId, orientation, angle }) =>
+                ({ deviceId, orientation, angle }))
+        });
+        renderSharedOrientationStatus();
+    });
+    socket.on('shared-orientation:update', (configuration) => {
+        sharedOrientationConfiguration = configuration;
+        console.info('[Orientation] Controller received status update', {
+            version: configuration.version,
+            devices: configuration.devices?.map(({ deviceId, orientation, angle }) =>
+                ({ deviceId, orientation, angle }))
+        });
+        renderSharedOrientationStatus();
+    });
     socket.on('layout-presets:current', (state) => {
         markServerCommunication();
         setLayoutPresets(state?.presets);

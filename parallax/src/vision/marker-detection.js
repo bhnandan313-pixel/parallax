@@ -14,6 +14,11 @@ const ARUCO_ROWS_BY_BITS = new Map([
     ['11', [0, 1, 1, 1, 0]]
 ]);
 
+function normalizeAngle(angle) {
+    const fullRotation = Math.PI * 2;
+    return ((angle + Math.PI) % fullRotation + fullRotation) % fullRotation - Math.PI;
+}
+
 export function isSupportedArucoMarkerId(markerId) {
     const id = Number(markerId);
     return Number.isInteger(id)
@@ -232,10 +237,15 @@ export function normalizeMarkerObservation(marker, imageWidth = 1, imageHeight =
 
     const width = Math.max(1, Number(imageWidth) || 1);
     const height = Math.max(1, Number(imageHeight) || 1);
+    const minX = Math.min(...corners.map((corner) => corner.x));
+    const maxX = Math.max(...corners.map((corner) => corner.x));
+    const minY = Math.min(...corners.map((corner) => corner.y));
+    const maxY = Math.max(...corners.map((corner) => corner.y));
     const normalizedCenter = {
         x: (center.x / 4) / width,
         y: (center.y / 4) / height
     };
+    const rotation = estimateMarkerRotation(corners);
     const confidence = Math.min(1, Math.max(0.2, area / Math.max(1, width * height * 0.2)));
 
     return {
@@ -246,10 +256,20 @@ export function normalizeMarkerObservation(marker, imageWidth = 1, imageHeight =
             y: center.y / 4
         },
         normalizedCenter,
-        rotation: estimateMarkerRotation(corners),
+        centerX: normalizedCenter.x,
+        centerY: normalizedCenter.y,
+        normalizedCorners: corners.map((corner) => ({
+            x: corner.x / width,
+            y: corner.y / height
+        })),
+        width: (maxX - minX) / width,
+        height: (maxY - minY) / height,
+        rotation,
+        orientationAngle: rotation,
         confidence: Number(confidence.toFixed(4)),
         area: Number(area.toFixed(2)),
-        visible: true
+        visible: true,
+        isVisible: true
     };
 }
 
@@ -390,70 +410,391 @@ export function applyVisionPerspective(point, calibration = createDefaultVisionC
 }
 
 export function createVisionTrackerState() {
-    return { devices: new Map(), timeoutMs: 1500 };
+    return { devices: new Map(), timeoutMs: 1500, staleMs: 10000 };
+}
+
+export function createSpatialRelationshipState() {
+    return {
+        deviceIds: null,
+        metrics: null,
+        previousDistance: null,
+        arrangement: 'UNKNOWN',
+        arrangementCandidate: null,
+        arrangementCandidateSince: null,
+        orientation: 'UNKNOWN',
+        orientationCandidate: null,
+        orientationCandidateSince: null,
+        reversed: false,
+        reversedCandidate: null,
+        reversedCandidateSince: null,
+        movement: 'STATIONARY'
+    };
+}
+
+function updateStableCandidate(state, key, candidate, timestamp, durationMs) {
+    const stableKey = key;
+    const candidateKey = `${key}Candidate`;
+    const sinceKey = `${key}CandidateSince`;
+    if (state[stableKey] === candidate) {
+        state[candidateKey] = null;
+        state[sinceKey] = null;
+        return state[stableKey];
+    }
+    if (state[candidateKey] !== candidate) {
+        state[candidateKey] = candidate;
+        state[sinceKey] = timestamp;
+        return state[stableKey];
+    }
+    if (timestamp - state[sinceKey] >= durationMs) {
+        state[stableKey] = candidate;
+        state[candidateKey] = null;
+        state[sinceKey] = null;
+    }
+    return state[stableKey];
+}
+
+function createUnknownSpatialRelationship(deviceIds = [], reason = 'insufficient-observations') {
+    return {
+        classification: 'UNKNOWN',
+        arrangement: 'UNKNOWN',
+        orientation: 'UNKNOWN',
+        reversed: false,
+        deviceIds,
+        relativeHorizontal: null,
+        relativeVertical: null,
+        relativeDistance: null,
+        relativeAngle: null,
+        relativeOrientationAngle: null,
+        markerScaleRatio: null,
+        movement: 'UNKNOWN',
+        confidence: 0,
+        trackingState: 'unknown',
+        reason,
+        timestamp: Date.now(),
+        coordinateSpace: 'normalized-camera-image'
+    };
+}
+
+export function updateSpatialRelationship(
+    state,
+    observations,
+    registeredDeviceIds,
+    timestamp = Date.now(),
+    options = {}
+) {
+    if (!state || !Array.isArray(registeredDeviceIds)) {
+        return createUnknownSpatialRelationship([], 'invalid-tracking-state');
+    }
+    const deviceIds = [...new Set(registeredDeviceIds.filter((id) =>
+        typeof id === 'string' && id.trim()))].slice(0, 2);
+    const now = Number.isFinite(Number(timestamp)) ? Number(timestamp) : Date.now();
+    const minConfidence = Number.isFinite(Number(options.minConfidence))
+        ? Number(options.minConfidence)
+        : 0.5;
+    const maxObservationAgeMs = Number.isFinite(Number(options.maxObservationAgeMs))
+        ? Number(options.maxObservationAgeMs)
+        : 2000;
+    const minObservationDurationMs = Number.isFinite(Number(options.minObservationDurationMs))
+        ? Number(options.minObservationDurationMs)
+        : 500;
+    const alpha = Number.isFinite(Number(options.alpha))
+        ? Math.min(0.95, Math.max(0.05, Number(options.alpha)))
+        : 0.3;
+
+    if (deviceIds.length !== 2) {
+        return createUnknownSpatialRelationship(deviceIds, 'two-devices-required');
+    }
+    if (!Array.isArray(observations)) {
+        return createUnknownSpatialRelationship(deviceIds);
+    }
+    if (!Array.isArray(state.deviceIds) || state.deviceIds.join('\0') !== deviceIds.join('\0')) {
+        Object.assign(state, createSpatialRelationshipState(), { deviceIds });
+    }
+
+    const observationByDevice = new Map(observations
+        .filter((observation) => observation?.deviceId)
+        .map((observation) => [observation.deviceId, observation]));
+    const [first, second] = deviceIds.map((deviceId) => observationByDevice.get(deviceId));
+    const pair = [first, second];
+    const usable = pair.every((observation) => {
+        const x = Number(observation?.centerX ?? observation?.normalizedCenter?.x ?? observation?.x);
+        const y = Number(observation?.centerY ?? observation?.normalizedCenter?.y ?? observation?.y);
+        const confidence = Number(observation?.confidence);
+        const observedAt = Number(observation?.lastDetectedAt ?? observation?.timestamp);
+        return observation
+            && observation.isVisible !== false
+            && observation.visible !== false
+            && observation.status !== 'lost'
+            && observation.trackingState !== 'lost'
+            && Number.isFinite(x) && x >= 0 && x <= 1
+            && Number.isFinite(y) && y >= 0 && y <= 1
+            && Number.isFinite(confidence) && confidence >= minConfidence
+            && Number.isFinite(observedAt)
+            && now - observedAt >= 0
+            && now - observedAt <= maxObservationAgeMs;
+    });
+    if (!usable) {
+        Object.assign(state, createSpatialRelationshipState(), { deviceIds });
+        return createUnknownSpatialRelationship(deviceIds, 'missing-or-low-confidence-observation');
+    }
+
+    const [firstObservation, secondObservation] = pair;
+    const firstX = Number(firstObservation.centerX ?? firstObservation.normalizedCenter?.x ?? firstObservation.x);
+    const firstY = Number(firstObservation.centerY ?? firstObservation.normalizedCenter?.y ?? firstObservation.y);
+    const secondX = Number(secondObservation.centerX ?? secondObservation.normalizedCenter?.x ?? secondObservation.x);
+    const secondY = Number(secondObservation.centerY ?? secondObservation.normalizedCenter?.y ?? secondObservation.y);
+    const deltaX = secondX - firstX;
+    const deltaY = secondY - firstY;
+    const distance = Math.hypot(deltaX, deltaY);
+    const firstAngle = Number(firstObservation.orientationAngle ?? firstObservation.rotation);
+    const secondAngle = Number(secondObservation.orientationAngle ?? secondObservation.rotation);
+    if (!Number.isFinite(firstAngle) || !Number.isFinite(secondAngle)) {
+        return createUnknownSpatialRelationship(deviceIds, 'invalid-orientation-observation');
+    }
+    const orientationDelta = normalizeAngle(secondAngle - firstAngle);
+    const firstWidth = Number(firstObservation.width);
+    const firstHeight = Number(firstObservation.height);
+    const secondWidth = Number(secondObservation.width);
+    const secondHeight = Number(secondObservation.height);
+    const firstScale = firstWidth > 0 && firstHeight > 0 ? Math.sqrt(firstWidth * firstHeight) : null;
+    const secondScale = secondWidth > 0 && secondHeight > 0 ? Math.sqrt(secondWidth * secondHeight) : null;
+    const rawMetrics = {
+        deltaX,
+        deltaY,
+        distance,
+        bearing: Math.atan2(deltaY, deltaX),
+        orientationDelta,
+        scaleRatio: firstScale && secondScale ? secondScale / firstScale : null
+    };
+    const previousMetrics = state.metrics;
+    const metrics = previousMetrics
+        ? {
+            deltaX: previousMetrics.deltaX + alpha * (rawMetrics.deltaX - previousMetrics.deltaX),
+            deltaY: previousMetrics.deltaY + alpha * (rawMetrics.deltaY - previousMetrics.deltaY),
+            distance: previousMetrics.distance + alpha * (rawMetrics.distance - previousMetrics.distance),
+            bearing: normalizeAngle(previousMetrics.bearing
+                + alpha * normalizeAngle(rawMetrics.bearing - previousMetrics.bearing)),
+            orientationDelta: normalizeAngle(previousMetrics.orientationDelta
+                + alpha * normalizeAngle(rawMetrics.orientationDelta - previousMetrics.orientationDelta)),
+            scaleRatio: rawMetrics.scaleRatio === null
+                ? null
+                : previousMetrics.scaleRatio === null
+                    ? rawMetrics.scaleRatio
+                    : previousMetrics.scaleRatio + alpha * (rawMetrics.scaleRatio - previousMetrics.scaleRatio)
+        }
+        : rawMetrics;
+    state.metrics = metrics;
+
+    const horizontal = Math.abs(metrics.deltaX);
+    const vertical = Math.abs(metrics.deltaY);
+    const dominantRatio = Math.max(horizontal, vertical) / Math.max(0.0001, Math.min(horizontal, vertical));
+    const currentArrangement = state.arrangement;
+    let arrangementCandidate = 'UNKNOWN';
+    const separationThreshold = currentArrangement === 'SEPARATED' ? 0.6 : 0.65;
+    if (metrics.distance >= separationThreshold) {
+        arrangementCandidate = 'SEPARATED';
+    } else if (horizontal >= Math.max(0.06, vertical * (currentArrangement === 'SIDE_BY_SIDE' ? 1.15 : 1.4))) {
+        arrangementCandidate = 'SIDE_BY_SIDE';
+    } else if (vertical >= Math.max(0.06, horizontal * (currentArrangement === 'STACKED' ? 1.15 : 1.4))) {
+        arrangementCandidate = 'STACKED';
+    }
+    const arrangement = updateStableCandidate(
+        state,
+        'arrangement',
+        arrangementCandidate,
+        now,
+        minObservationDurationMs
+    );
+
+    const angleDifference = Math.abs(metrics.orientationDelta);
+    const orientationCandidate = angleDifference >= (state.orientation === 'ANGLED' ? 0.26 : 0.35)
+        ? 'ANGLED'
+        : 'PARALLEL';
+    const orientation = updateStableCandidate(
+        state,
+        'orientation',
+        orientationCandidate,
+        now,
+        minObservationDurationMs
+    );
+    const reversedCandidate = arrangementCandidate === 'SIDE_BY_SIDE'
+        && metrics.deltaX < (state.reversed ? 0.02 : -0.04);
+    const reversed = updateStableCandidate(
+        state,
+        'reversed',
+        reversedCandidate,
+        now,
+        minObservationDurationMs
+    );
+
+    const minimumMarkerConfidence = Math.min(
+        Number(firstObservation.confidence),
+        Number(secondObservation.confidence)
+    );
+    const axisClarity = dominantRatio >= 1.4 ? 1 : Math.max(0, (dominantRatio - 1) / 0.4);
+    const confidence = Number((minimumMarkerConfidence * (0.65 + 0.35 * axisClarity)).toFixed(4));
+    const confidentPair = confidence >= minConfidence;
+    const previousDistance = state.previousDistance;
+    const movementThreshold = Number(options.movementThreshold ?? 0.003);
+    if (previousDistance !== null && Math.abs(metrics.distance - previousDistance) > movementThreshold) {
+        state.movement = metrics.distance < previousDistance ? 'CLOSER' : 'FARTHER';
+    } else if (previousDistance === null || Math.abs(metrics.distance - previousDistance) <= movementThreshold) {
+        state.movement = 'STATIONARY';
+    }
+    state.previousDistance = metrics.distance;
+
+    const classification = !confidentPair
+        ? 'UNKNOWN'
+        : arrangement === 'SEPARATED'
+            ? 'SEPARATED'
+                : arrangement === 'SIDE_BY_SIDE' && reversed
+                ? 'REVERSED'
+                : orientation === 'ANGLED'
+                    ? 'ANGLED'
+                    : arrangement;
+    return {
+        classification,
+        arrangement: confidentPair ? arrangement : 'UNKNOWN',
+        orientation: confidentPair ? orientation : 'UNKNOWN',
+        reversed: confidentPair && arrangement === 'SIDE_BY_SIDE' && reversed,
+        isReliable: confidentPair && (arrangement !== 'UNKNOWN' || orientation === 'ANGLED'),
+        deviceIds,
+        relativeHorizontal: Number(metrics.deltaX.toFixed(4)),
+        relativeVertical: Number(metrics.deltaY.toFixed(4)),
+        relativeDistance: Number(metrics.distance.toFixed(4)),
+        relativeAngle: Number(metrics.bearing.toFixed(4)),
+        relativeOrientationAngle: Number(metrics.orientationDelta.toFixed(4)),
+        markerScaleRatio: metrics.scaleRatio === null
+            ? null
+            : Number(metrics.scaleRatio.toFixed(4)),
+        movement: confidentPair ? state.movement : 'UNKNOWN',
+        confidence,
+        trackingState: 'tracked',
+        reason: !confidentPair ? 'low-confidence' : arrangement === 'UNKNOWN' ? 'ambiguous-geometry' : null,
+        timestamp: now,
+        coordinateSpace: 'normalized-camera-image'
+    };
 }
 
 export function updateVisionTracker(state, observations, timestamp = Date.now(), options = {}) {
     if (!state?.devices) {
         return [];
     }
-    const alpha = Math.min(0.95, Math.max(0.05, Number(options.alpha ?? 0.35)));
-    const timeoutMs = Math.max(250, Number(options.timeoutMs ?? state.timeoutMs ?? 1500));
-    const maxJump = Math.max(0.01, Number(options.maxJump ?? 0.18));
-    const accepted = [];
+    const requestedAlpha = Number(options.alpha ?? 0.35);
+    const requestedTimeout = Number(options.timeoutMs ?? state.timeoutMs ?? 1500);
+    const requestedStaleTime = Number(options.staleMs ?? state.staleMs ?? 10000);
+    const requestedMaxJump = Number(options.maxJump ?? 0.18);
+    const alpha = Number.isFinite(requestedAlpha)
+        ? Math.min(0.95, Math.max(0.05, requestedAlpha))
+        : 0.35;
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(250, requestedTimeout) : 1500;
+    const staleMs = Number.isFinite(requestedStaleTime)
+        ? Math.max(timeoutMs, requestedStaleTime)
+        : Math.max(timeoutMs, 10000);
+    const maxJump = Number.isFinite(requestedMaxJump) ? Math.max(0.01, requestedMaxJump) : 0.18;
+    const updatedAt = Number.isFinite(Number(timestamp)) ? Number(timestamp) : Date.now();
     const seen = new Set();
+
+    for (const [deviceId, previous] of state.devices) {
+        const age = updatedAt - previous.lastDetectedAt;
+        if (age >= staleMs) {
+            state.devices.delete(deviceId);
+        } else if (age >= timeoutMs && previous.status !== 'lost') {
+            state.devices.set(deviceId, {
+                ...previous,
+                isVisible: false,
+                visible: false,
+                status: 'lost',
+                trackingState: 'lost'
+            });
+        }
+    }
 
     for (const observation of Array.isArray(observations) ? observations : []) {
         const deviceId = observation?.deviceId;
-        if (!deviceId || seen.has(deviceId)) {
+        if (typeof deviceId !== 'string' || !deviceId.trim() || seen.has(deviceId)) {
             continue;
         }
-        const x = Number(observation.normalizedCenter?.x ?? observation.x);
-        const y = Number(observation.normalizedCenter?.y ?? observation.y);
-        const rotation = Number(observation.rotation ?? 0);
+        const x = Number(observation.centerX ?? observation.normalizedCenter?.x ?? observation.x);
+        const y = Number(observation.centerY ?? observation.normalizedCenter?.y ?? observation.y);
+        const rotation = normalizeAngle(Number(observation.orientationAngle ?? observation.rotation ?? 0));
         const confidence = Number(observation.confidence ?? 0.5);
-        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(rotation)) {
+        if (!Number.isFinite(x) || x < 0 || x > 1
+            || !Number.isFinite(y) || y < 0 || y > 1
+            || !Number.isFinite(rotation) || !Number.isFinite(confidence)) {
             continue;
         }
         const previous = state.devices.get(deviceId);
         const jump = previous ? Math.hypot(x - previous.x, y - previous.y) : 0;
-        if (previous?.status !== 'lost' && previous && jump > maxJump && confidence < 0.75) {
+        if (previous?.isVisible && jump > maxJump && confidence < 0.75) {
             continue;
         }
 
-        const smoothedX = previous ? previous.x + alpha * (x - previous.x) : x;
-        const smoothedY = previous ? previous.y + alpha * (y - previous.y) : y;
-        let angleDelta = rotation - (previous?.rotation ?? rotation);
-        while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
-        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
-        const smoothedRotation = previous
-            ? previous.rotation + alpha * angleDelta
+        const canSmooth = previous && previous.status !== 'lost';
+        const smoothedX = canSmooth ? previous.x + alpha * (x - previous.x) : x;
+        const smoothedY = canSmooth ? previous.y + alpha * (y - previous.y) : y;
+        const angleDelta = normalizeAngle(rotation - (canSmooth ? previous.orientationAngle : rotation));
+        const smoothedRotation = canSmooth
+            ? previous.orientationAngle + alpha * angleDelta
             : rotation;
+        const centerX = Number(smoothedX.toFixed(4));
+        const centerY = Number(smoothedY.toFixed(4));
+        const orientationAngle = Number(smoothedRotation.toFixed(4));
+        const markerId = Number(observation.markerId ?? observation.id);
+        const corners = Array.isArray(observation.corners)
+            ? observation.corners.map((corner) => ({ x: Number(corner.x), y: Number(corner.y) }))
+            : [];
+        const markerWidth = Number(observation.width);
+        const markerHeight = Number(observation.height);
         const item = {
             ...observation,
+            id: Number.isFinite(markerId) ? markerId : observation.id,
+            markerId: Number.isFinite(markerId) ? markerId : null,
             deviceId,
-            x: Number(smoothedX.toFixed(4)),
-            y: Number(smoothedY.toFixed(4)),
-            normalizedCenter: { x: Number(smoothedX.toFixed(4)), y: Number(smoothedY.toFixed(4)) },
-            rotation: Number(smoothedRotation.toFixed(4)),
+            centerX,
+            centerY,
+            x: centerX,
+            y: centerY,
+            relativeX: centerX,
+            relativeY: centerY,
+            center: { x: centerX, y: centerY },
+            normalizedCenter: { x: centerX, y: centerY },
+            corners,
+            width: Number.isFinite(markerWidth) ? Math.min(1, Math.max(0, markerWidth)) : 0,
+            height: Number.isFinite(markerHeight) ? Math.min(1, Math.max(0, markerHeight)) : 0,
+            orientationAngle,
+            rotation: orientationAngle,
             confidence: Number(Math.max(0, Math.min(1, confidence)).toFixed(4)),
+            timestamp: updatedAt,
+            lastDetectedAt: updatedAt,
+            isVisible: true,
+            visible: true,
             status: 'tracked',
-            lastDetectedAt: timestamp
+            trackingState: 'tracked'
         };
         state.devices.set(deviceId, item);
         seen.add(deviceId);
-        accepted.push(item);
     }
 
     for (const [deviceId, previous] of state.devices) {
-        if (!seen.has(deviceId) && timestamp - previous.lastDetectedAt >= timeoutMs && previous.status !== 'lost') {
-            state.devices.set(deviceId, {
-                ...previous,
-                status: 'lost'
-            });
+        if (seen.has(deviceId)) {
+            continue;
         }
+        const age = updatedAt - previous.lastDetectedAt;
+        if (age >= staleMs) {
+            state.devices.delete(deviceId);
+            continue;
+        }
+        const status = age >= timeoutMs ? 'lost' : 'occluded';
+        state.devices.set(deviceId, {
+            ...previous,
+            isVisible: false,
+            visible: false,
+            status,
+            trackingState: status
+        });
     }
-    return accepted;
+    return [...state.devices.values()];
 }
 
 export function resetVisionTrackerDevice(state, deviceId) {

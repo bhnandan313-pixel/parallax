@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createAdaptiveRenderingConfiguration } from './adaptive-rendering.js';
 import { createDefaultLayout } from './geometry.js';
 import { createContentRenderer } from './renderer.js';
+import {
+    calculateScreenSurfaceViewports,
+    createScreenSurfaceCalibration
+} from './screen-surface-geometry.js';
+import { createDisplayMarkerOverlay } from '../vision/marker-overlay.js';
 
 class FakeImage {
     style = {};
@@ -124,7 +130,14 @@ class FakeCanvas {
             translate: (...args) => this.calls.push(['translate', ...args]),
             rotate: (...args) => this.calls.push(['rotate', ...args]),
             scale: (...args) => this.calls.push(['scale', ...args]),
-            drawImage: (...args) => this.calls.push(['drawImage', ...args])
+            drawImage: (...args) => this.calls.push(['drawImage', ...args]),
+            fillRect: (...args) => this.calls.push(['fillRect', ...args]),
+            setTransform: (...args) => this.calls.push(['setTransform', ...args]),
+            beginPath: () => this.calls.push(['beginPath']),
+            moveTo: (...args) => this.calls.push(['moveTo', ...args]),
+            lineTo: (...args) => this.calls.push(['lineTo', ...args]),
+            closePath: () => this.calls.push(['closePath']),
+            clip: () => this.calls.push(['clip'])
         };
     }
 }
@@ -146,6 +159,11 @@ class FakeContainer {
 
     append(child) {
         this.children.push(child);
+        child.parentNode = this;
+    }
+
+    prepend(child) {
+        this.children.unshift(child);
         child.parentNode = this;
     }
 
@@ -419,6 +437,167 @@ test('changing wall fit redraws video frames without restarting synchronized pla
         assert.equal(video.pauseCalls, pauseCalls);
     }
     assert.ok(drawCalls(canvas).length >= 5);
+});
+
+test('adaptive viewport updates redraw the same synchronized video without restarting playback', () => {
+    const savedAlignments = [];
+    const { canvas, videos, render } = setupRenderer(1, undefined, {
+        onAlignmentChange: (alignment) => savedAlignments.push(alignment)
+    });
+    render({
+        contentType: 'video',
+        videoUrl: '/adaptive.mp4',
+        mediaId: 'adaptive-video',
+        updateId: 'adaptive-video-update'
+    });
+    const video = videos[0];
+    render.setAudioSettings({ mode: 'master', masterDeviceId: 'phone-right' }, 'phone-right', {
+        volume: 1,
+        enabled: true
+    });
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'adaptive-video',
+        positionSeconds: 4,
+        startedAt: 1000,
+        serverNow: 1000,
+        timelineId: 'adaptive-timeline'
+    });
+
+    const first = createScreenSurfaceCalibration({
+        deviceId: 'phone-right',
+        corners: [
+            { x: 0.5, y: 0.2 }, { x: 0.9, y: 0.2 },
+            { x: 0.9, y: 0.8 }, { x: 0.5, y: 0.8 }
+        ],
+        confidence: 0.9,
+        timestamp: 1000
+    });
+    const second = createScreenSurfaceCalibration({
+        deviceId: 'phone-left',
+        corners: [
+            { x: 0.1, y: 0.2 }, { x: 0.5, y: 0.2 },
+            { x: 0.5, y: 0.8 }, { x: 0.1, y: 0.8 }
+        ],
+        confidence: 0.9,
+        timestamp: 1000
+    });
+    const mapping = calculateScreenSurfaceViewports([first, second], { timestamp: 1100 });
+    const configuration = createAdaptiveRenderingConfiguration({
+        viewports: mapping,
+        devices: [
+            { deviceId: 'phone-right', screen: 1, connected: true },
+            { deviceId: 'phone-left', screen: 2, connected: true }
+        ],
+        enabled: true,
+        fitMode: 'cover',
+        version: 3
+    });
+    const playCalls = video.playCalls;
+    const pauseCalls = video.pauseCalls;
+    const currentTime = video.currentTime;
+    const drawCount = drawCalls(canvas).length;
+
+    assert.equal(render.setAdaptiveRendering(configuration), true);
+    assert.ok(drawCalls(canvas).length > drawCount);
+    assert.ok(canvas.calls.some(([name]) => name === 'clip'));
+    assert.ok(canvas.calls.some(([name]) => name === 'setTransform'));
+    assert.equal(render.setSharedOrientation({
+        version: 1,
+        mode: 'AUTO',
+        orientation: 'landscape',
+        renderingActive: true
+    }), true);
+    const landscapeTransform = canvas.calls.filter(([name]) => name === 'setTransform').at(-1);
+    assert.equal(render.setSharedOrientation({
+        version: 2,
+        mode: 'AUTO',
+        orientation: 'portrait',
+        renderingActive: true
+    }), true);
+    const portraitTransform = canvas.calls.filter(([name]) => name === 'setTransform').at(-1);
+    assert.notDeepEqual(portraitTransform, landscapeTransform);
+    assert.equal(videos.length, 1);
+    assert.equal(video.currentTime, currentTime);
+    assert.equal(video.playCalls, playCalls);
+    assert.equal(video.pauseCalls, pauseCalls);
+
+    assert.equal(render.setScreenFill({ enabled: true, fitMode: 'manual' }), true);
+    canvas.dispatchPointer('pointerdown', 1, 100, 100);
+    canvas.dispatchPointer('pointerdown', 2, 200, 100);
+    canvas.dispatchPointer('pointermove', 2, 300, 100);
+    canvas.dispatchPointer('pointerup', 1, 100, 100);
+    canvas.dispatchPointer('pointerup', 2, 300, 100);
+    assert.deepEqual(savedAlignments.at(-1), { horizontal: 50, vertical: 0, scale: 2 });
+    assert.ok(canvas.calls.some(([name, ...args]) =>
+        name === 'drawImage' && args.length === 9));
+    assert.equal(video.currentTime, currentTime);
+    assert.equal(video.playCalls, playCalls);
+    assert.equal(video.pauseCalls, pauseCalls);
+});
+
+test('marker overlay remains separate and visible through fit changes without restarting video', () => {
+    const { canvas, container, videos, render } = setupRenderer(1);
+    render({
+        contentType: 'video',
+        videoUrl: '/marker-overlay.mp4',
+        mediaId: 'marker-overlay-video',
+        updateId: 'marker-overlay-video-update'
+    });
+    const video = videos[0];
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'marker-overlay-video',
+        positionSeconds: 2,
+        startedAt: 1000,
+        serverNow: 1000,
+        timelineId: 'marker-overlay-timeline'
+    });
+    const playCalls = video.playCalls;
+    const pauseCalls = video.pauseCalls;
+    const currentTime = video.currentTime;
+    const markerDocument = {
+        createElement(tagName) {
+            if (tagName === 'canvas') {
+                return {
+                    style: {},
+                    width: 0,
+                    height: 0,
+                    getContext: () => ({
+                        fillStyle: '#000',
+                        fillRect() {}
+                    })
+                };
+            }
+            return {
+                style: {},
+                dataset: {},
+                children: [],
+                setAttribute() {},
+                append(child) {
+                    this.children.push(child);
+                }
+            };
+        }
+    };
+    const marker = createDisplayMarkerOverlay({
+        document: markerDocument,
+        deviceId: 'marker-phone',
+        markerId: 321
+    });
+    container.prepend(marker);
+    const initialDraws = drawCalls(canvas).length;
+    for (const fitMode of ['cover', 'contain', 'stretch', 'manual']) {
+        assert.equal(render.setScreenFill({ enabled: true, fitMode }), true);
+        assert.equal(container.children[0], marker);
+        assert.equal(marker.dataset.markerId, '321');
+        assert.equal(marker.style.zIndex, '25');
+    }
+    assert.ok(drawCalls(canvas).length >= initialDraws + 4);
+    assert.equal(videos.length, 1);
+    assert.equal(video.currentTime, currentTime);
+    assert.equal(video.playCalls, playCalls);
+    assert.equal(video.pauseCalls, pauseCalls);
 });
 
 test('crops adjacent horizontal screens from the shared panorama without distortion', () => {

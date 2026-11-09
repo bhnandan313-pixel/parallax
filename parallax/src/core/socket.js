@@ -37,6 +37,9 @@ export function createParallaxSocket(options = {}) {
     socket.on?.('connect', () => {
         console.log('[Parallax Socket] Connected:', socket.io.uri);
     });
+    socket.on?.('disconnect', (reason) => {
+        console.warn('[Parallax Socket] Disconnected:', reason);
+    });
     socket.on?.('connect_error', (error) => {
         console.error('[Parallax Socket] Connection error:', error.message, 'URL:', socketUrl);
     });

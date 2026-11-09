@@ -12,7 +12,8 @@ export default defineConfig({
             'featuring-liability-roll-rico.trycloudflare.com',
             'concerns-walking-junction-thursday.trycloudflare.com',
             'diego-imports-pointing-discussions.trycloudflare.com',
-            'eric-nearest-robin-cute.trycloudflare.com'
+            'eric-nearest-robin-cute.trycloudflare.com',
+            'mighty-mapping-roulette-bookmarks.trycloudflare.com'
         ],
         proxy: {
             '/api': {

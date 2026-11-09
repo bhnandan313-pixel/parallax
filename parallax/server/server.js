@@ -15,6 +15,22 @@ import {
     isValidAlignmentSettings,
     validateDisplayLayout
 } from '../src/display/geometry.js';
+import { createAdaptiveRenderingConfiguration } from '../src/display/adaptive-rendering.js';
+import {
+    createSharedOrientationState,
+    SHARED_ORIENTATION_MODES,
+    updateSharedOrientation
+} from '../src/display/shared-orientation.js';
+import {
+    createSpatialCoordinateMapping,
+    hasMeaningfulSpatialMappingChange
+} from '../src/display/spatial-mapping.js';
+import {
+    calculateScreenSurfaceViewports,
+    createScreenSurfaceCalibration,
+    SCREEN_SURFACE_CALIBRATION_MAX_AGE_MS,
+    validateScreenSurfaceCalibration
+} from '../src/display/screen-surface-geometry.js';
 import {
     createPlaybackTimeline,
     getPlaybackPosition,
@@ -36,7 +52,9 @@ import {
 import {
     associateMarkersWithDevices,
     createVisionTrackerState,
+    createSpatialRelationshipState,
     createPersistentMarkerAssignments,
+    updateSpatialRelationship,
     updateVisionTracker
 } from '../src/vision/marker-detection.js';
 
@@ -165,6 +183,8 @@ export function createParallaxServer({
     const pairingSessions = new Map();
     const pairingTimers = new Map();
     const visionSessions = new Map();
+    const deviceOrientations = new Map();
+    const sharedOrientationState = createSharedOrientationState();
     const deviceRoom = 'parallax:devices';
     const upload = multer({
         storage: multer.memoryStorage(),
@@ -202,14 +222,25 @@ export function createParallaxServer({
     const alignmentSettings = createDefaultAlignmentSettings(MAX_SCREEN_COUNT);
     let calibrationPresets = [];
     let displayLayout = createDefaultLayout(MIN_SCREEN_COUNT);
-    let displaySettings = { screenFillEnabled: true, fitMode: 'cover' };
+    let displaySettings = {
+        screenFillEnabled: true,
+        fitMode: 'cover',
+        adaptiveRenderingEnabled: false,
+        orientationMode: 'MANUAL'
+    };
     let layoutPresets = [];
     let persistedAssignments = {};
     let persistedMarkerAssignments = {};
+    let surfaceCalibrations = {};
     let deviceNames = {};
     const deviceActivity = new Map();
     let alignmentRevision = 0;
     let settingsUpdateQueue = Promise.resolve();
+    let adaptiveRenderingVersion = 0;
+    let lastAdaptiveRenderingSignature = null;
+    let adaptiveRenderingExpiryTimer = null;
+    let sharedOrientationVersion = 0;
+    let lastSharedOrientationSignature = null;
 
     function getSettingsSnapshot() {
         const snapshot = {
@@ -218,6 +249,7 @@ export function createParallaxServer({
             assignmentMode,
             assignments: { ...persistedAssignments },
             markerAssignments: { ...persistedMarkerAssignments },
+            surfaceCalibrations: structuredClone(surfaceCalibrations),
             screens: getStoredAlignmentSnapshot(),
             layout: cloneDisplayLayout(displayLayout),
             ...displaySettings,
@@ -384,6 +416,36 @@ export function createParallaxServer({
                 shouldRepair = true;
             }
 
+            const storedSurfaceCalibrations = settings.surfaceCalibrations
+                && typeof settings.surfaceCalibrations === 'object'
+                && !Array.isArray(settings.surfaceCalibrations)
+                ? settings.surfaceCalibrations
+                : {};
+            surfaceCalibrations = {};
+            for (const [deviceId, calibration] of Object.entries(storedSurfaceCalibrations)) {
+                if (!validateScreenSurfaceCalibration(calibration)
+                    || calibration.deviceId !== deviceId) {
+                    shouldRepair = true;
+                    continue;
+                }
+                const normalized = createScreenSurfaceCalibration({
+                    deviceId,
+                    corners: calibration.corners,
+                    confidence: calibration.confidence,
+                    timestamp: calibration.timestamp
+                });
+                if (normalized) {
+                    surfaceCalibrations[deviceId] = normalized;
+                } else {
+                    shouldRepair = true;
+                }
+            }
+            if (settings.surfaceCalibrations !== undefined
+                && (typeof settings.surfaceCalibrations !== 'object'
+                    || Array.isArray(settings.surfaceCalibrations))) {
+                shouldRepair = true;
+            }
+
             const presets = Array.isArray(settings.presets) ? settings.presets : [];
             const validPresets = [];
             const names = new Set();
@@ -437,10 +499,22 @@ export function createParallaxServer({
             layoutPresets = validLayoutPresets;
             const screenFillEnabled = settings.screenFillEnabled;
             const fitMode = settings.fitMode;
+            const adaptiveRenderingEnabled = settings.adaptiveRenderingEnabled;
+            const orientationMode = settings.orientationMode ?? 'MANUAL';
+            if (settings.orientationMode === undefined) {
+                shouldRepair = true;
+            }
             if (typeof screenFillEnabled !== 'boolean') {
                 shouldRepair = true;
             }
             if (!FIT_MODES.includes(fitMode)) {
+                shouldRepair = true;
+            }
+            if (typeof adaptiveRenderingEnabled !== 'boolean') {
+                shouldRepair = true;
+            }
+            if (settings.orientationMode === undefined
+                || !SHARED_ORIENTATION_MODES.includes(settings.orientationMode)) {
                 shouldRepair = true;
             }
             displaySettings = {
@@ -449,7 +523,11 @@ export function createParallaxServer({
                     : true,
                 fitMode: FIT_MODES.includes(fitMode)
                     ? fitMode
-                    : 'cover'
+                    : 'cover',
+                adaptiveRenderingEnabled: adaptiveRenderingEnabled === true,
+                orientationMode: SHARED_ORIENTATION_MODES.includes(orientationMode)
+                    ? orientationMode
+                    : 'MANUAL'
             };
             settings = {
                 calibrationEnabled: settings.calibrationEnabled,
@@ -457,6 +535,7 @@ export function createParallaxServer({
                 assignmentMode,
                 assignments: { ...persistedAssignments },
                 markerAssignments: { ...persistedMarkerAssignments },
+                surfaceCalibrations: structuredClone(surfaceCalibrations),
                 screens: storedScreens,
                 presets: validPresets,
                 layout: cloneDisplayLayout(displayLayout),
@@ -492,13 +571,18 @@ export function createParallaxServer({
         displayLayout = cloneDisplayLayout(settings.layout ?? createDefaultLayout(totalScreens));
         displaySettings = {
             screenFillEnabled: settings.screenFillEnabled ?? true,
-            fitMode: settings.fitMode ?? 'cover'
+            fitMode: settings.fitMode ?? 'cover',
+            adaptiveRenderingEnabled: settings.adaptiveRenderingEnabled === true,
+            orientationMode: SHARED_ORIENTATION_MODES.includes(settings.orientationMode)
+                ? settings.orientationMode
+                : 'MANUAL'
         };
         layoutPresets = settings.layoutPresets ?? [];
         totalScreens = settings.totalScreens ?? MIN_SCREEN_COUNT;
         assignmentMode = settings.assignmentMode ?? 'automatic';
         persistedAssignments = { ...(settings.assignments ?? {}) };
         persistedMarkerAssignments = { ...(settings.markerAssignments ?? {}) };
+        surfaceCalibrations = structuredClone(settings.surfaceCalibrations ?? {});
         deviceNames = { ...(settings.deviceNames ?? {}) };
         mediaManifest = loadedMediaManifest;
         currentContent = { ...mediaManifest.currentContent };
@@ -507,8 +591,10 @@ export function createParallaxServer({
         for (const [id, screen] of Object.entries(persistedAssignments)) {
             devices.set(id, createDeviceRecord(id, screen));
         }
+        scheduleAdaptiveRenderingExpiry();
         scheduleTimer = setInterval(() => {
             runMediaScheduler();
+            broadcastSharedOrientation();
         }, 500);
         scheduleTimer.unref?.();
         return runMediaScheduler();
@@ -983,13 +1069,15 @@ export function createParallaxServer({
                     displayLayout = previous.layout;
                     displaySettings = {
                         screenFillEnabled: previous.screenFillEnabled,
-                        fitMode: previous.fitMode
+                        fitMode: previous.fitMode,
+                        adaptiveRenderingEnabled: previous.adaptiveRenderingEnabled
                     };
                     layoutPresets = previous.layoutPresets;
                     totalScreens = previous.totalScreens;
                     assignmentMode = previous.assignmentMode;
                     persistedAssignments = previous.assignments;
                     persistedMarkerAssignments = previous.markerAssignments;
+                    surfaceCalibrations = previous.surfaceCalibrations;
                     for (const [id, device] of devices) {
                         if (id in persistedAssignments) {
                             device.screen = persistedAssignments[id];
@@ -1107,6 +1195,207 @@ export function createParallaxServer({
         };
     }
 
+    function getScreenSurfaceViewportSnapshot() {
+        const assignedDeviceIds = [...devices.values()]
+            .filter((device) => device.screen !== null)
+            .sort((left, right) => left.screen - right.screen)
+            .slice(0, 2)
+            .map((device) => device.id);
+        const calibrations = assignedDeviceIds
+            .map((deviceId) => surfaceCalibrations[deviceId])
+            .filter(Boolean);
+        return calculateScreenSurfaceViewports(calibrations);
+    }
+
+    function getAdaptiveRenderingSnapshot() {
+        const displayDevices = [1, 2].map((screen) => {
+            const device = [...devices.values()].find((entry) => entry.screen === screen);
+            return {
+                deviceId: device?.id ?? null,
+                screen,
+                connected: Boolean(device?.socketId)
+                    && displayLayout.screens[screen]?.enabled !== false
+            };
+        });
+        const calibrations = displayDevices
+            .map(({ deviceId }) => deviceId ? surfaceCalibrations[deviceId] : null)
+            .filter(Boolean);
+        const viewports = calculateScreenSurfaceViewports(calibrations);
+        const configuration = createAdaptiveRenderingConfiguration({
+            viewports,
+            devices: displayDevices,
+            enabled: displaySettings.adaptiveRenderingEnabled,
+            screenFillEnabled: displaySettings.screenFillEnabled,
+            fitMode: displaySettings.fitMode,
+            layout: displayLayout,
+            version: adaptiveRenderingVersion || 1
+        });
+        const { version, ...signatureData } = configuration;
+        const signature = JSON.stringify(signatureData);
+        if (signature !== lastAdaptiveRenderingSignature) {
+            adaptiveRenderingVersion += 1;
+            lastAdaptiveRenderingSignature = signature;
+        }
+        configuration.version = adaptiveRenderingVersion;
+        return configuration;
+    }
+
+    function getSharedOrientationSnapshot() {
+        const now = Date.now();
+        const displayDevices = [1, 2].map((screen) => {
+            const device = [...devices.values()].find((entry) => entry.screen === screen);
+            const report = device ? deviceOrientations.get(device.id) : null;
+            return {
+                deviceId: device?.id ?? null,
+                screen,
+                connected: Boolean(device?.socketId)
+                    && displayLayout.screens[screen]?.enabled !== false,
+                orientation: report?.orientation ?? null,
+                angle: report?.angle ?? null,
+                source: report?.source ?? null,
+                reportedAt: report?.timestamp ?? null,
+                orientationFresh: Boolean(report)
+                    && now - Number(report.timestamp) <= 30_000
+            };
+        });
+        const deviceIds = displayDevices.map(({ deviceId }) => deviceId).filter(Boolean);
+        const relationship = [...visionSessions.values()]
+            .map((session) => session.latestSpatialRelationship)
+            .filter((candidate) => candidate
+                && candidate.isReliable === true
+                && now - Number(candidate.timestamp) >= 0
+                && now - Number(candidate.timestamp) <= 2000
+                && Array.isArray(candidate.deviceIds)
+                && candidate.deviceIds.length === 2
+                && deviceIds.length === 2
+                && deviceIds.every((deviceId) => candidate.deviceIds.includes(deviceId)))
+            .sort((left, right) => Number(right.timestamp) - Number(left.timestamp))[0] ?? null;
+        const decision = updateSharedOrientation(sharedOrientationState, {
+            mode: displaySettings.orientationMode,
+            devices: displayDevices,
+            reports: deviceOrientations,
+            relationship,
+            timestamp: now
+        });
+        const adaptiveRendering = getAdaptiveRenderingSnapshot();
+        const [firstAngle, secondAngle] = displayDevices.map(({ angle }) => angle);
+        const relativeDeviceAngle = Number.isInteger(firstAngle) && Number.isInteger(secondAngle)
+            ? ((secondAngle - firstAngle + 540) % 360) - 180
+            : null;
+        const orientation = {
+            ...decision,
+            arrangement: relationship?.classification ?? 'UNKNOWN',
+            reversed: relationship?.reversed === true,
+            relativeDeviceAngle,
+            relativeMarkerAngle: relationship?.relativeOrientationAngle !== null
+                && relationship?.relativeOrientationAngle !== undefined
+                && Number.isFinite(Number(relationship.relativeOrientationAngle))
+                ? Number(relationship.relativeOrientationAngle)
+                : null,
+            spatialConfidence: Number.isFinite(Number(relationship?.confidence))
+                ? Number(relationship.confidence)
+                : 0,
+            coordinateSpace: relationship?.coordinateSpace ?? 'unavailable',
+            physicalGeometryCalibrated: false,
+            renderingActive: adaptiveRendering.active,
+            renderingFallbackReason: adaptiveRendering.active
+                ? null
+                : adaptiveRendering.reason,
+            devices: displayDevices,
+            version: sharedOrientationVersion || 1
+        };
+        const signature = JSON.stringify({
+            mode: orientation.mode,
+            orientation: orientation.orientation,
+            pendingOrientation: orientation.pendingOrientation,
+            confidence: Number(orientation.confidence.toFixed(2)),
+            reason: orientation.reason,
+            arrangement: orientation.arrangement,
+            reversed: orientation.reversed,
+            relativeDeviceAngle: orientation.relativeDeviceAngle,
+            relativeMarkerAngle: orientation.relativeMarkerAngle === null
+                ? null
+                : Number(orientation.relativeMarkerAngle.toFixed(2)),
+            spatialConfidence: Number(orientation.spatialConfidence.toFixed(2)),
+            renderingActive: orientation.renderingActive,
+            renderingFallbackReason: orientation.renderingFallbackReason,
+            devices: orientation.devices.map(({ deviceId, screen, connected, orientation, angle,
+                orientationFresh }) =>
+                ({ deviceId, screen, connected, orientation, angle, orientationFresh }))
+        });
+        if (signature !== lastSharedOrientationSignature) {
+            sharedOrientationVersion += 1;
+            lastSharedOrientationSignature = signature;
+        }
+        orientation.version = sharedOrientationVersion;
+        return orientation;
+    }
+
+    function broadcastSharedOrientation() {
+        const orientation = getSharedOrientationSnapshot();
+        for (const device of devices.values()) {
+            if (device.socketId && (device.screen === 1 || device.screen === 2)) {
+                io.sockets.sockets.get(device.socketId)?.emit(
+                    'shared-orientation:update',
+                    orientation
+                );
+            }
+        }
+        for (const controllerId of controllers) {
+            io.sockets.sockets.get(controllerId)?.emit(
+                'shared-orientation:update',
+                orientation
+            );
+        }
+        return orientation;
+    }
+
+    function broadcastAdaptiveRendering() {
+        const configuration = getAdaptiveRenderingSnapshot();
+        for (const device of devices.values()) {
+            if (device.socketId && (device.screen === 1 || device.screen === 2)) {
+                io.sockets.sockets.get(device.socketId)?.emit(
+                    'adaptive-rendering:update',
+                    configuration
+                );
+            }
+        }
+        for (const controllerId of controllers) {
+            io.sockets.sockets.get(controllerId)?.emit(
+                'adaptive-rendering:update',
+                configuration
+            );
+        }
+        return configuration;
+    }
+
+    function scheduleAdaptiveRenderingExpiry() {
+        if (adaptiveRenderingExpiryTimer !== null) {
+            clearTimeout(adaptiveRenderingExpiryTimer);
+            adaptiveRenderingExpiryTimer = null;
+        }
+        const timestamps = Object.values(surfaceCalibrations)
+            .map((calibration) => Number(calibration.timestamp))
+            .filter(Number.isFinite);
+        if (timestamps.length === 0) {
+            return;
+        }
+        const now = Date.now();
+        const expirations = timestamps
+            .map((timestamp) => timestamp + SCREEN_SURFACE_CALIBRATION_MAX_AGE_MS + 1)
+            .filter((timestamp) => timestamp > now);
+        if (expirations.length === 0) {
+            return;
+        }
+        const expiresAt = Math.min(...expirations);
+        adaptiveRenderingExpiryTimer = setTimeout(() => {
+            adaptiveRenderingExpiryTimer = null;
+            broadcastAdaptiveRendering();
+            scheduleAdaptiveRenderingExpiry();
+        }, expiresAt - now);
+        adaptiveRenderingExpiryTimer.unref?.();
+    }
+
     function getDeviceConfiguration(device) {
         return {
             deviceId: device.id,
@@ -1129,6 +1418,21 @@ export function createParallaxServer({
                 continue;
             }
             io.sockets.sockets.get(device.socketId)?.emit('vision:marker-mode', { enabled });
+        }
+    }
+
+    function getRecentSpatialMapping(mapping) {
+        const age = Date.now() - Number(mapping?.timestamp);
+        return mapping?.valid === true && Number.isFinite(age) && age >= 0 && age <= 2000
+            ? mapping : null;
+    }
+
+    function emitSpatialMappingToDevices(mapping) {
+        for (const { deviceId } of mapping.devices) {
+            const device = devices.get(deviceId);
+            if (device?.socketId) {
+                io.sockets.sockets.get(device.socketId)?.emit('spatial:mapping:update', mapping);
+            }
         }
     }
 
@@ -1159,6 +1463,14 @@ export function createParallaxServer({
             revision: alignmentRevision
         });
         target.emit('playback:sync', createPlaybackTimeline(playbackState));
+        const spatialMapping = [...visionSessions.values()]
+            .filter((session) => session.spatialMappingCurrentValid)
+            .map((session) => getRecentSpatialMapping(session.latestValidSpatialMapping))
+            .find((mapping) => mapping?.devices.some(({ deviceId }) => deviceId === device.id));
+        if (spatialMapping) {
+            target.emit('spatial:mapping:update', spatialMapping);
+        }
+        target.emit('shared-orientation:update', getSharedOrientationSnapshot());
     }
 
     function broadcastScreenConfiguration() {
@@ -1170,6 +1482,8 @@ export function createParallaxServer({
             screens: getAlignmentSnapshot(),
             ...displaySettings
         });
+        broadcastAdaptiveRendering();
+        broadcastSharedOrientation();
         broadcastDeviceSnapshot();
         broadcastDiagnostics();
     }
@@ -1766,9 +2080,15 @@ export function createParallaxServer({
                 expiresAt,
                 createdAt: Date.now(),
                 status: 'waiting',
-                tracker: createVisionTrackerState()
+                tracker: createVisionTrackerState(),
+                relationshipTracker: createSpatialRelationshipState(),
+                latestSpatialRelationship: null,
+                latestValidSpatialMapping: null,
+                lastBroadcastSpatialMapping: null,
+                spatialMappingCurrentValid: false
             });
             setVisionMarkerMode();
+            broadcastSharedOrientation();
             respond({
                 ok: true,
                 token,
@@ -1802,6 +2122,7 @@ export function createParallaxServer({
             }
             session.cameraSocketId = socket.id;
             session.status = 'connected';
+            session.spatialMappingCurrentValid = false;
             socket.data.visionCameraToken = token;
             io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
                 connected: true,
@@ -1832,25 +2153,49 @@ export function createParallaxServer({
                         : null;
                     const x = normalized ? Number(normalized.x) : Number(marker.x);
                     const y = normalized ? Number(normalized.y) : Number(marker.y);
+                    const corners = Array.isArray(marker.corners)
+                        ? marker.corners.map((corner) => ({
+                            x: Number(corner?.x),
+                            y: Number(corner?.y)
+                        }))
+                        : [];
+                    const cornerWidth = corners.length === 4
+                        ? Math.max(...corners.map(({ x: cornerX }) => cornerX))
+                            - Math.min(...corners.map(({ x: cornerX }) => cornerX))
+                        : 0;
+                    const cornerHeight = corners.length === 4
+                        ? Math.max(...corners.map(({ y: cornerY }) => cornerY))
+                            - Math.min(...corners.map(({ y: cornerY }) => cornerY))
+                        : 0;
+                    const orientationAngle = Number(marker.orientationAngle ?? marker.rotation);
                     return {
                         id: Number(marker.id),
+                        markerId: Number(marker.markerId ?? marker.id),
                         x,
                         y,
+                        centerX: x,
+                        centerY: y,
                         normalizedCenter: { x, y },
-                        corners: Array.isArray(marker.corners)
-                            ? marker.corners.map((corner) => ({
-                                x: Number(corner?.x),
-                                y: Number(corner?.y)
-                            }))
-                            : [],
-                        rotation: Number(marker.rotation),
+                        corners,
+                        width: marker.width !== null && marker.width !== undefined
+                            && Number.isFinite(Number(marker.width))
+                            ? Number(marker.width)
+                            : cornerWidth,
+                        height: marker.height !== null && marker.height !== undefined
+                            && Number.isFinite(Number(marker.height))
+                            ? Number(marker.height)
+                            : cornerHeight,
+                        rotation: orientationAngle,
+                        orientationAngle,
                         confidence: Number(marker.confidence),
-                        visible: Boolean(marker.visible),
+                        visible: marker.visible !== false && marker.isVisible !== false,
+                        isVisible: marker.visible !== false && marker.isVisible !== false,
                         timestamp: Number(marker.timestamp) || Date.now(),
                         deviceId: typeof marker.deviceId === 'string' ? marker.deviceId : null
                     };
                 })
                 .filter((marker) => Number.isFinite(marker.id)
+                    && marker.visible
                     && marker.id >= 0
                     && Number.isFinite(marker.x)
                     && marker.x >= 0
@@ -1861,7 +2206,26 @@ export function createParallaxServer({
                     && Number.isFinite(marker.rotation)
                     && Number.isFinite(marker.confidence)
                     && marker.confidence >= 0
-                    && marker.confidence <= 1);
+                    && marker.confidence <= 1
+                    && Number.isFinite(marker.markerId)
+                    && marker.markerId >= 0
+                    && marker.markerId === marker.id
+                    && (marker.corners.length === 0 || marker.corners.length === 4)
+                    && Number.isFinite(marker.centerX)
+                    && marker.centerX >= 0
+                    && marker.centerX <= 1
+                    && Number.isFinite(marker.centerY)
+                    && marker.centerY >= 0
+                    && marker.centerY <= 1
+                    && Number.isFinite(marker.width)
+                    && marker.width >= 0
+                    && marker.width <= 1
+                    && Number.isFinite(marker.height)
+                    && marker.height >= 0
+                    && marker.height <= 1
+                    && marker.corners.every((corner) =>
+                        Number.isFinite(corner.x) && corner.x >= 0 && corner.x <= 1
+                        && Number.isFinite(corner.y) && corner.y >= 0 && corner.y <= 1));
             const registeredDevices = [...devices.values()].map((device) => ({
                 id: device.id,
                 name: deviceNames[device.id] || device.id,
@@ -1873,38 +2237,59 @@ export function createParallaxServer({
             const tracked = updateVisionTracker(session.tracker, associated.map((marker) => ({
                 ...marker,
                 normalizedCenter: {
-                    x: Number(marker.normalizedCenter?.x ?? marker.x),
-                    y: Number(marker.normalizedCenter?.y ?? marker.y)
+                    x: marker.centerX,
+                    y: marker.centerY
                 }
             })));
             const observations = tracked.map((marker) => ({
                 ...marker,
-                relativeX: marker.x,
-                relativeY: marker.y,
-                status: 'tracked',
-                trackingState: 'tracked',
+                relativeX: marker.centerX,
+                relativeY: marker.centerY,
+                orientationReference: 'camera-image-plane',
                 calibrated: false
             }));
-            for (const marker of session.tracker.devices.values()) {
-                if (marker.status === 'lost'
-                    && !observations.some((observation) => observation.deviceId === marker.deviceId)) {
-                    observations.push({
-                        ...marker,
-                        relativeX: marker.x,
-                        relativeY: marker.y,
-                        trackingState: 'lost'
-                    });
+            const registeredDeviceIds = [...devices.values()]
+                .filter((device) => device.screen === 1 || device.screen === 2)
+                .sort((left, right) => left.screen - right.screen)
+                .map((device) => device.id);
+            const relationship = updateSpatialRelationship(
+                session.relationshipTracker,
+                observations,
+                registeredDeviceIds
+            );
+            session.latestSpatialRelationship = relationship;
+            const spatialMapping = createSpatialCoordinateMapping(
+                observations.filter((observation) =>
+                    registeredDeviceIds.includes(observation.deviceId)),
+                { timestamp: Date.now(), relationship }
+            );
+            session.spatialMappingCurrentValid = spatialMapping.valid;
+            if (spatialMapping.valid) {
+                session.latestValidSpatialMapping = spatialMapping;
+                if (hasMeaningfulSpatialMappingChange(
+                    getRecentSpatialMapping(session.lastBroadcastSpatialMapping),
+                    spatialMapping
+                )) {
+                    emitSpatialMappingToDevices(spatialMapping);
+                    session.lastBroadcastSpatialMapping = spatialMapping;
                 }
             }
             const payload = {
                 token,
                 connected: true,
-                status: observations.length > 0 ? 'tracking' : 'waiting',
+                status: observations.some((observation) => observation.isVisible)
+                    ? 'tracking'
+                    : 'waiting',
                 markers: observations,
+                relationship,
+                spatialMappingValid: spatialMapping.valid,
+                spatialMappingReason: spatialMapping.reason,
+                ...(spatialMapping.valid ? { spatialMapping } : {}),
                 timestamp: Date.now()
             };
             const recipientSocket = io.sockets.sockets.get(session.controllerId);
             recipientSocket?.emit('vision:camera:update', payload);
+            broadcastSharedOrientation();
             const matchedMarkerIds = associated.map((marker) => ({
                 markerId: marker.id,
                 deviceId: marker.deviceId
@@ -1936,6 +2321,9 @@ export function createParallaxServer({
             if (session && session.cameraSocketId === socket.id) {
                 session.cameraSocketId = null;
                 session.status = 'waiting';
+                session.spatialMappingCurrentValid = false;
+                session.latestSpatialRelationship = null;
+                session.pendingSurfaceCalibrationDeviceId = null;
                 io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
                     connected: false,
                     token,
@@ -1946,6 +2334,7 @@ export function createParallaxServer({
                 visionSessions.delete(token);
                 setVisionMarkerMode(false);
             }
+            broadcastSharedOrientation();
             delete socket.data.visionCameraToken;
             respond({ ok: true, status: 'disconnected' });
         });
@@ -2053,8 +2442,127 @@ export function createParallaxServer({
                 });
                 console.log(`Device assigned: ${device.id} | Screen ${device.screen} | Socket ${socket.id}`);
             }
+            broadcastAdaptiveRendering();
+            broadcastSharedOrientation();
             broadcastDeviceSnapshot();
             broadcastDiagnostics();
+        });
+
+        socket.on('device:orientation', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const device = [...devices.values()]
+                .find((entry) => entry.socketId === socket.id);
+            const sourceConfidence = {
+                'screen-orientation-api': 1,
+                'window-orientation': 0.8,
+                viewport: 0.6,
+                'device-orientation-sensor': 0.8
+            }[request?.source];
+            const angle = request?.angle === null || request?.angle === undefined
+                ? null
+                : Number(request.angle);
+            let rejectionReason = null;
+            if (!device) {
+                rejectionReason = 'socket-not-associated-with-registered-device';
+            } else if (request?.deviceId !== device.id) {
+                rejectionReason = 'persistent-device-id-does-not-match-socket';
+            } else if (!['portrait', 'landscape'].includes(request.orientation)) {
+                rejectionReason = 'invalid-orientation-value';
+            } else if (sourceConfidence === undefined) {
+                rejectionReason = 'unsupported-orientation-source';
+            } else if (angle !== null && ![0, 90, 180, 270].includes(angle)) {
+                rejectionReason = 'invalid-orientation-angle';
+            } else if (typeof request.timestamp !== 'number'
+                || !Number.isFinite(request.timestamp) || request.timestamp <= 0) {
+                rejectionReason = 'invalid-report-timestamp';
+            }
+            if (rejectionReason) {
+                console.warn('[Orientation] Report rejected', {
+                    socketId: socket.id,
+                    deviceId: request?.deviceId ?? null,
+                    associatedDeviceId: device?.id ?? null,
+                    rejectionReason
+                });
+                respond({ ok: false, rejectionReason });
+                return;
+            }
+            const report = {
+                deviceId: device.id,
+                orientation: request.orientation,
+                angle,
+                source: request.source,
+                confidence: sourceConfidence,
+                timestamp: Date.now()
+            };
+            const previous = deviceOrientations.get(device.id);
+            if (previous
+                && previous.orientation === report.orientation
+                && previous.angle === report.angle
+                && previous.source === report.source) {
+                previous.timestamp = report.timestamp;
+            } else {
+                deviceOrientations.set(device.id, report);
+            }
+            console.info('[Orientation] Report accepted and associated', {
+                socketId: socket.id,
+                deviceId: device.id,
+                screen: device.screen,
+                orientation: report.orientation,
+                angle: report.angle,
+                source: report.source,
+                clientTimestamp: request.timestamp,
+                receivedAt: report.timestamp
+            });
+            const configuration = broadcastSharedOrientation();
+            respond({
+                ok: true,
+                deviceId: device.id,
+                screen: device.screen,
+                orientation: report.orientation,
+                angle: report.angle,
+                reportedAt: report.timestamp,
+                configurationVersion: configuration.version
+            });
+        });
+
+        socket.on('device:orientation:heartbeat', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const device = [...devices.values()]
+                .find((entry) => entry.socketId === socket.id);
+            if (!device || request?.deviceId !== device.id) {
+                console.warn('[Orientation] Heartbeat rejected', {
+                    socketId: socket.id,
+                    deviceId: request?.deviceId ?? null,
+                    associatedDeviceId: device?.id ?? null
+                });
+                respond({
+                    ok: false,
+                    rejectionReason: device
+                        ? 'persistent-device-id-does-not-match-socket'
+                        : 'socket-not-associated-with-registered-device'
+                });
+                return;
+            }
+            const report = deviceOrientations.get(device.id);
+            if (report) {
+                report.timestamp = Date.now();
+                console.info('[Orientation] Heartbeat refreshed report', {
+                    deviceId: device.id,
+                    reportedAt: report.timestamp
+                });
+                const configuration = broadcastSharedOrientation();
+                respond({
+                    ok: true,
+                    deviceId: device.id,
+                    reportedAt: report.timestamp,
+                    configurationVersion: configuration.version
+                });
+            } else {
+                console.warn('[Orientation] Heartbeat received without an initial report', {
+                    deviceId: device.id
+                });
+                respond({ ok: false, rejectionReason: 'initial-orientation-report-missing' });
+            }
         });
 
         socket.on('content:update', async (content, acknowledge) => {
@@ -2128,6 +2636,12 @@ export function createParallaxServer({
             socket.emit('calibration:current', {
                 enabled: calibrationEnabled
             });
+            socket.emit('screen-surface:calibrations:current', {
+                calibrations: structuredClone(surfaceCalibrations)
+            });
+            socket.emit('screen-surface:viewports:current', getScreenSurfaceViewportSnapshot());
+            socket.emit('adaptive-rendering:current', getAdaptiveRenderingSnapshot());
+            socket.emit('shared-orientation:current', getSharedOrientationSnapshot());
             socket.emit('alignment:current', {
                 screens: getAlignmentSnapshot()
             });
@@ -2563,7 +3077,11 @@ export function createParallaxServer({
                 return;
             }
             if (!request || typeof request.screenFillEnabled !== 'boolean'
-                || !FIT_MODES.includes(request.fitMode)) {
+                || !FIT_MODES.includes(request.fitMode)
+                || (request.adaptiveRenderingEnabled !== undefined
+                    && typeof request.adaptiveRenderingEnabled !== 'boolean')
+                || (request.orientationMode !== undefined
+                    && !SHARED_ORIENTATION_MODES.includes(request.orientationMode))) {
                 respond({ ok: false, message: 'Invalid screen fill or fit mode settings.' });
                 return;
             }
@@ -2572,7 +3090,11 @@ export function createParallaxServer({
                 await updateSettings(() => {
                     displaySettings = {
                         screenFillEnabled: request.screenFillEnabled,
-                        fitMode: request.fitMode
+                        fitMode: request.fitMode,
+                        adaptiveRenderingEnabled: request.adaptiveRenderingEnabled
+                            ?? displaySettings.adaptiveRenderingEnabled,
+                        orientationMode: request.orientationMode
+                            ?? displaySettings.orientationMode
                     };
                 });
             } catch (error) {
@@ -3098,6 +3620,128 @@ export function createParallaxServer({
             });
         });
 
+        socket.on('screen-surface:calibration:start', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized screen-surface calibration request' });
+                return;
+            }
+            const deviceId = request?.deviceId;
+            const device = typeof deviceId === 'string' ? devices.get(deviceId) : null;
+            if (!device || device.screen === null) {
+                respond({ ok: false, message: 'Select a registered display device assigned to a screen.' });
+                return;
+            }
+            const visionSession = [...visionSessions.values()].find((session) =>
+                session.controllerId === socket.id && session.cameraSocketId);
+            if (!visionSession) {
+                respond({ ok: false, message: 'Connect the Vision Camera before capturing screen corners.' });
+                return;
+            }
+            const cameraSocket = io.sockets.sockets.get(visionSession.cameraSocketId);
+            if (!cameraSocket) {
+                respond({ ok: false, message: 'The Vision Camera disconnected. Reconnect and try again.' });
+                return;
+            }
+            visionSession.pendingSurfaceCalibrationDeviceId = deviceId;
+            cameraSocket.emit('screen-surface:calibration:request', { deviceId });
+            respond({ ok: true, deviceId });
+        });
+
+        socket.on('screen-surface:calibration:capture', (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = socket.data.visionCameraToken;
+            const session = typeof token === 'string' ? visionSessions.get(token) : null;
+            if (!session || session.cameraSocketId !== socket.id
+                || session.pendingSurfaceCalibrationDeviceId !== request?.deviceId) {
+                respond({ ok: false, message: 'No matching screen-corner calibration is active.' });
+                return;
+            }
+            const captured = createScreenSurfaceCalibration({
+                deviceId: request.deviceId,
+                corners: request.corners,
+                confidence: 0.75,
+                timestamp: Date.now()
+            });
+            if (!captured) {
+                respond({ ok: false, message: 'Four ordered, valid screen corners are required.' });
+                return;
+            }
+            session.pendingSurfaceCalibrationDeviceId = null;
+            io.sockets.sockets.get(session.controllerId)?.emit(
+                'screen-surface:calibration:capture',
+                {
+                    deviceId: captured.deviceId,
+                    corners: captured.corners.map(({ x, y }) => ({ x, y }))
+                }
+            );
+            respond({ ok: true });
+        });
+
+        socket.on('screen-surface:calibration:cancel', (acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const token = socket.data.visionCameraToken;
+            const session = typeof token === 'string' ? visionSessions.get(token) : null;
+            if (session?.cameraSocketId === socket.id) {
+                session.pendingSurfaceCalibrationDeviceId = null;
+            }
+            respond({ ok: true });
+        });
+
+        socket.on('screen-surface:calibration:save', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized screen-surface calibration request' });
+                return;
+            }
+            const deviceId = request?.deviceId;
+            const device = typeof deviceId === 'string' ? devices.get(deviceId) : null;
+            if (!device || device.screen === null) {
+                respond({ ok: false, message: 'Select a registered display device assigned to a screen.' });
+                return;
+            }
+            const calibration = createScreenSurfaceCalibration({
+                deviceId,
+                corners: request?.corners,
+                confidence: request?.confidence,
+                timestamp: Date.now()
+            });
+            if (!calibration) {
+                respond({
+                    ok: false,
+                    message: 'Four ordered, valid normalized camera-image corners and confidence of at least 50% are required.'
+                });
+                return;
+            }
+
+            let settings;
+            try {
+                settings = await updateSettings(() => {
+                    surfaceCalibrations[deviceId] = calibration;
+                });
+            } catch (error) {
+                console.error('Unable to persist screen-surface calibration:', error);
+                respond({ ok: false, message: 'Unable to save screen-surface calibration.' });
+                return;
+            }
+
+            for (const controllerId of controllers) {
+                const controllerSocket = io.sockets.sockets.get(controllerId);
+                controllerSocket?.emit('screen-surface:calibrations:current', {
+                    calibrations: structuredClone(settings.surfaceCalibrations)
+                });
+                controllerSocket?.emit('screen-surface:viewports:current',
+                    getScreenSurfaceViewportSnapshot());
+            }
+            scheduleAdaptiveRenderingExpiry();
+            broadcastAdaptiveRendering();
+            respond({
+                ok: true,
+                calibration: structuredClone(calibration),
+                viewports: getScreenSurfaceViewportSnapshot()
+            });
+        });
+
         socket.on('alignment:set', async (state, acknowledge) => {
             const respond = typeof acknowledge === 'function'
                 ? acknowledge
@@ -3330,6 +3974,9 @@ export function createParallaxServer({
                     } else {
                         session.cameraSocketId = null;
                         session.status = 'waiting';
+                        session.spatialMappingCurrentValid = false;
+                        session.latestSpatialRelationship = null;
+                        session.pendingSurfaceCalibrationDeviceId = null;
                         io.sockets.sockets.get(session.controllerId)?.emit('vision:camera:status', {
                             connected: false,
                             token,
@@ -3361,6 +4008,8 @@ export function createParallaxServer({
                 device.disconnectTimer.unref?.();
                 console.log(`Device reservation retained for ${reservationMs}ms: ${deviceId} | Screen ${device.screen}`);
             }
+            broadcastAdaptiveRendering();
+            broadcastSharedOrientation();
             broadcastDeviceSnapshot();
             broadcastDiagnostics();
         });
@@ -3374,6 +4023,10 @@ export function createParallaxServer({
         if (scheduleTimer) {
             clearInterval(scheduleTimer);
             scheduleTimer = null;
+        }
+        if (adaptiveRenderingExpiryTimer !== null) {
+            clearTimeout(adaptiveRenderingExpiryTimer);
+            adaptiveRenderingExpiryTimer = null;
         }
         for (const device of devices.values()) {
             if (device.disconnectTimer) {
@@ -3462,11 +4115,14 @@ function createDefaultSettings() {
         assignmentMode: 'automatic',
         assignments: {},
         markerAssignments: {},
+        surfaceCalibrations: {},
         screens: createDefaultAlignmentSettings(MAX_SCREEN_COUNT),
         presets: [],
         layout: createDefaultLayout(MIN_SCREEN_COUNT),
         screenFillEnabled: true,
         fitMode: 'cover',
+        adaptiveRenderingEnabled: false,
+        orientationMode: 'MANUAL',
         layoutPresets: []
     };
 }

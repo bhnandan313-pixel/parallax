@@ -1,5 +1,5 @@
 {
-  "calibrationEnabled": false,
+  "calibrationEnabled": true,
   "totalScreens": 2,
   "assignmentMode": "automatic",
   "assignments": {
@@ -28,8 +28,10 @@
     "vision-runtime-evidence": null,
     "bcdfc0bf-cb67-4ad0-9e1d-cf6e8db42a53": null,
     "10145ddc-11f6-489d-b24e-c1424e04f467": null,
-    "0796ee73-ec47-4584-b5b5-3b07fb447869": 2,
-    "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": 1
+    "0796ee73-ec47-4584-b5b5-3b07fb447869": null,
+    "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": null,
+    "af377bac-fa4c-48d4-a07f-92882d39d132": 1,
+    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": 2
   },
   "markerAssignments": {
     "60f643f1-3382-40bb-8bda-52ba5f0bbc07": 463,
@@ -58,18 +60,20 @@
     "bcdfc0bf-cb67-4ad0-9e1d-cf6e8db42a53": 330,
     "10145ddc-11f6-489d-b24e-c1424e04f467": 990,
     "0796ee73-ec47-4584-b5b5-3b07fb447869": 23,
-    "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": 343
+    "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": 343,
+    "af377bac-fa4c-48d4-a07f-92882d39d132": 574,
+    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": 147
   },
   "screens": {
     "1": {
-      "horizontal": 0,
-      "vertical": 0,
-      "scale": 1
+      "horizontal": 280.4018020629883,
+      "vertical": -2.2981414794921875,
+      "scale": 0.8136446198433108
     },
     "2": {
-      "horizontal": 0,
-      "vertical": 25,
-      "scale": 0.95
+      "horizontal": 249.5833396911621,
+      "vertical": 47.458425998687744,
+      "scale": 1.1309551112274596
     },
     "3": {
       "horizontal": -23,
@@ -143,6 +147,8 @@
       }
     }
   },
+  "screenFillEnabled": true,
+  "fitMode": "cover",
   "layoutPresets": [],
   "presets": []
 }

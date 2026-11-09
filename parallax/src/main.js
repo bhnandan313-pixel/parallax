@@ -7,6 +7,7 @@ import {
     isValidAlignmentSettings,
     validateDisplayLayout
 } from './display/geometry.js';
+import { createDeviceOrientationReporter } from './display/device-orientation.js';
 import { mountController } from './controller/controller.js';
 import {
     createAudioSettings,
@@ -17,10 +18,12 @@ import {
 } from './media/audio.js';
 import { isFullscreen, toggleFullscreen } from './media/fullscreen.js';
 import {
-    computeMarkerIdForDevice,
     detectMarkersFromImageData
 } from './vision/marker-detection.js';
-import { renderArucoMarker } from './vision/marker-renderer.js';
+import {
+    createDisplayMarkerOverlay,
+    resizeDisplayMarkerOverlay
+} from './vision/marker-overlay.js';
 import './styles/main.css';
 
 if (location.pathname === '/controller' || location.pathname === '/controller/') {
@@ -29,25 +32,6 @@ if (location.pathname === '/controller' || location.pathname === '/controller/')
     startVisionCamera();
 } else {
     startDisplay();
-}
-
-function createMarkerOverlay(deviceId, allocatedMarkerId = null) {
-    const markerId = Number.isInteger(allocatedMarkerId)
-        ? allocatedMarkerId
-        : computeMarkerIdForDevice(deviceId);
-    const overlay = document.createElement('div');
-    overlay.className = 'parallax-vision-marker';
-    overlay.setAttribute('aria-label', `Device marker ${markerId}`);
-    const canvas = document.createElement('canvas');
-    canvas.className = 'parallax-vision-marker-grid';
-    const moduleSize = 56;
-    const quietZoneModules = 1;
-    renderArucoMarker(canvas, markerId, { moduleSize, quietZoneModules });
-    const label = document.createElement('span');
-    label.className = 'parallax-vision-marker-label';
-    label.textContent = `ID ${markerId}`;
-    overlay.append(canvas, label);
-    return overlay;
 }
 
 function startVisionCamera() {
@@ -72,7 +56,8 @@ function startVisionCamera() {
         lastSuccessfulDetectionAt: null,
         registeredMarkers: [],
         matchedMarkers: 0,
-        lastDiagnosticsLogAt: 0
+        lastDiagnosticsLogAt: 0,
+        surfaceCornerCapture: null
     };
 
     app.innerHTML = `
@@ -92,6 +77,16 @@ function startVisionCamera() {
                 <div class="vision-camera-preview-wrap" aria-label="Live camera preview">
                     <video class="vision-camera-preview" autoplay playsinline muted></video>
                     <canvas class="vision-camera-marker-overlay" data-vision-marker-overlay></canvas>
+                    <div class="vision-surface-capture" data-surface-capture hidden>
+                        <strong data-surface-capture-title>Screen corner calibration</strong>
+                        <span data-surface-capture-status>Waiting for a corner.</span>
+                        <div class="vision-surface-capture-points" data-surface-capture-points></div>
+                        <div class="vision-surface-capture-actions">
+                            <button type="button" data-surface-capture-undo>Undo corner</button>
+                            <button type="button" data-surface-capture-cancel>Cancel</button>
+                            <button type="button" data-surface-capture-confirm disabled>Confirm corners</button>
+                        </div>
+                    </div>
                     <div class="vision-camera-overlay" data-vision-status>Waiting for camera access</div>
                 </div>
                 <section class="vision-tracking-summary" aria-live="polite" aria-label="Tracking status">
@@ -149,6 +144,14 @@ function startVisionCamera() {
     const connectButton = app.querySelector('[data-camera-connect]');
     const reconnectButton = app.querySelector('[data-camera-reconnect]');
     const disconnectButton = app.querySelector('[data-camera-disconnect]');
+    const surfaceCapture = app.querySelector('[data-surface-capture]');
+    const surfaceCaptureTitle = app.querySelector('[data-surface-capture-title]');
+    const surfaceCaptureStatus = app.querySelector('[data-surface-capture-status]');
+    const surfaceCapturePoints = app.querySelector('[data-surface-capture-points]');
+    const surfaceCaptureUndo = app.querySelector('[data-surface-capture-undo]');
+    const surfaceCaptureCancel = app.querySelector('[data-surface-capture-cancel]');
+    const surfaceCaptureConfirm = app.querySelector('[data-surface-capture-confirm]');
+    const surfaceCornerNames = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
 
     function setStatus(message, label) {
         statusNode.textContent = message;
@@ -179,6 +182,71 @@ function startVisionCamera() {
             trackingStatusNode.textContent = `Tracking ${matchedCount} matched device${matchedCount === 1 ? '' : 's'}`;
             trackingStatusNode.dataset.state = 'tracking';
         }
+    }
+
+    function renderSurfaceCornerCapture() {
+        const capture = cameraState.surfaceCornerCapture;
+        surfaceCapture.hidden = !capture;
+        if (!capture) {
+            surfaceCapturePoints.replaceChildren();
+            return;
+        }
+        surfaceCaptureTitle.textContent = `Calibrating ${capture.deviceId}`;
+        const nextCorner = surfaceCornerNames[capture.corners.length];
+        surfaceCaptureStatus.textContent = capture.corners.length < 4
+            ? `Tap the display's ${nextCorner} corner (${capture.corners.length + 1} of 4).`
+            : 'Four points captured in top-left clockwise order. Review and confirm.';
+        surfaceCaptureConfirm.disabled = capture.corners.length !== 4;
+        surfaceCaptureUndo.disabled = capture.corners.length === 0;
+        surfaceCapturePoints.replaceChildren();
+        capture.corners.forEach((point, index) => {
+            const marker = document.createElement('span');
+            marker.className = 'vision-surface-capture-point';
+            marker.style.left = `${point.displayX * 100}%`;
+            marker.style.top = `${point.displayY * 100}%`;
+            marker.textContent = String(index + 1);
+            surfaceCapturePoints.append(marker);
+        });
+    }
+
+    function captureSurfaceCorner(event) {
+        const capture = cameraState.surfaceCornerCapture;
+        if (!capture || event.target.closest('button')) {
+            return;
+        }
+        if (!video.videoWidth || !video.videoHeight) {
+            surfaceCaptureStatus.textContent = 'Start the camera before capturing screen corners.';
+            return;
+        }
+        const bounds = video.getBoundingClientRect();
+        const scale = Math.max(bounds.width / video.videoWidth, bounds.height / video.videoHeight);
+        const renderedWidth = video.videoWidth * scale;
+        const renderedHeight = video.videoHeight * scale;
+        const offsetX = (bounds.width - renderedWidth) / 2;
+        const offsetY = (bounds.height - renderedHeight) / 2;
+        const displayX = (event.clientX - bounds.left) / bounds.width;
+        const displayY = (event.clientY - bounds.top) / bounds.height;
+        const x = (event.clientX - bounds.left - offsetX) / renderedWidth;
+        const y = (event.clientY - bounds.top - offsetY) / renderedHeight;
+        if (x < 0 || x > 1 || y < 0 || y > 1) {
+            surfaceCaptureStatus.textContent = 'Tap inside the visible camera image.';
+            return;
+        }
+        if (capture.corners.length >= 4) {
+            return;
+        }
+        capture.corners.push({ x, y, displayX, displayY });
+        renderSurfaceCornerCapture();
+        event.preventDefault();
+    }
+
+    function cancelSurfaceCornerCapture() {
+        if (!cameraState.surfaceCornerCapture) {
+            return;
+        }
+        cameraState.surfaceCornerCapture = null;
+        renderSurfaceCornerCapture();
+        cameraState.socket?.emit('screen-surface:calibration:cancel');
     }
 
     function loadCameraDevices() {
@@ -222,6 +290,7 @@ function startVisionCamera() {
         }
         loopStatusNode.textContent = 'Stopped';
         cameraStatusNode.textContent = 'Disconnected';
+        cancelSurfaceCornerCapture();
         updateTrackingStatus(0, 0);
     }
 
@@ -326,6 +395,7 @@ function startVisionCamera() {
             cameraState.lastSuccessfulDetectionAt = Date.now();
             lastDetectionNode.textContent = new Date(cameraState.lastSuccessfulDetectionAt).toLocaleTimeString();
         }
+        const detectionTimestamp = Date.now();
         const payload = {
             frame: {
                 width,
@@ -335,17 +405,21 @@ function startVisionCamera() {
             },
             markers: markers.map((marker) => ({
                 id: marker.id,
+                markerId: marker.id,
                 x: marker.normalizedCenter.x,
                 y: marker.normalizedCenter.y,
+                centerX: marker.centerX,
+                centerY: marker.centerY,
                 normalizedCenter: marker.normalizedCenter,
-                corners: marker.corners.map((corner) => ({
-                    x: corner.x / width,
-                    y: corner.y / height
-                })),
+                corners: marker.normalizedCorners,
+                width: marker.width,
+                height: marker.height,
                 rotation: marker.rotation,
+                orientationAngle: marker.orientationAngle,
                 confidence: marker.confidence,
                 visible: true,
-                timestamp: Date.now(),
+                isVisible: true,
+                timestamp: detectionTimestamp,
                 deviceId: null
             }))
         };
@@ -432,6 +506,36 @@ function startVisionCamera() {
         setStatus('Camera disconnected.', 'Disconnected');
         sessionNode.textContent = 'Not connected';
     });
+    surfaceCaptureUndo.addEventListener('click', () => {
+        cameraState.surfaceCornerCapture?.corners.pop();
+        renderSurfaceCornerCapture();
+    });
+    surfaceCaptureCancel.addEventListener('click', cancelSurfaceCornerCapture);
+    surfaceCaptureConfirm.addEventListener('click', () => {
+        const capture = cameraState.surfaceCornerCapture;
+        if (!capture || capture.corners.length !== 4) {
+            return;
+        }
+        cameraState.socket.timeout(5000).emit('screen-surface:calibration:capture', {
+            deviceId: capture.deviceId,
+            corners: capture.corners.map(({ x, y }) => ({ x, y }))
+        }, (error, response) => {
+            if (error || !response?.ok) {
+                surfaceCaptureStatus.textContent = response?.message
+                    || error?.message
+                    || 'Unable to send the captured corners.';
+                return;
+            }
+            cameraState.surfaceCornerCapture = null;
+            renderSurfaceCornerCapture();
+            setStatus('Four corners sent to the controller for confirmation.', 'Connected');
+        });
+    });
+    app.querySelector('.vision-camera-preview-wrap').addEventListener(
+        'pointerdown',
+        captureSurfaceCorner,
+        { passive: false }
+    );
     updateCameraSelection();
     cameraSelect.addEventListener('change', () => {
         if (cameraState.mediaStream) {
@@ -457,7 +561,22 @@ function startVisionCamera() {
         });
     });
 
+    cameraState.socket.on('screen-surface:calibration:request', (request) => {
+        if (typeof request?.deviceId !== 'string' || !request.deviceId.trim()) {
+            console.error('Received an invalid screen-surface corner capture request:', request);
+            return;
+        }
+        cameraState.surfaceCornerCapture = {
+            deviceId: request.deviceId,
+            corners: []
+        };
+        renderSurfaceCornerCapture();
+        setStatus(`Tap the four corners of ${request.deviceId}'s visible screen.`, 'Detecting');
+    });
+
     cameraState.socket.on('disconnect', () => {
+        cameraState.surfaceCornerCapture = null;
+        renderSurfaceCornerCapture();
         setStatus('Camera socket disconnected.', 'Disconnected');
         sessionNode.textContent = 'Not connected';
     });
@@ -488,10 +607,14 @@ function startDisplay() {
     let alignmentRevision = null;
     let displayedUpdateId = null;
     let socket = null;
+    let orientationReporter = null;
+    let orientationReportingReady = false;
+    let sharedOrientationConfiguration = null;
     let identifyOverlay = null;
     let identifyTimer = null;
     let playbackDriftTimer = null;
     let markerOverlay = null;
+    let markerResizeObserver = null;
     let visionMarkerMode = false;
     let phoneControls = null;
     let fullscreenButton = null;
@@ -680,6 +803,44 @@ function startDisplay() {
 
     showStatus('Connecting to server');
     socket = createParallaxSocket();
+    orientationReporter = createDeviceOrientationReporter({
+        deviceId,
+        emit: (report) => {
+            if (!orientationReportingReady) {
+                console.info('[Orientation] Report held until device registration completes', {
+                    deviceId
+                });
+                return;
+            }
+            if (!socket?.connected) {
+                console.warn('[Orientation] Report not sent: socket is disconnected', {
+                    deviceId
+                });
+                return;
+            }
+            const eventName = report.heartbeat
+                ? 'device:orientation:heartbeat'
+                : 'device:orientation';
+            console.info('[Orientation] Sending report', {
+                deviceId,
+                eventName,
+                orientation: report.orientation,
+                angle: report.angle
+            });
+            socket.timeout(5000).emit(eventName, report, (error, response) => {
+                if (error || !response?.ok) {
+                    console.error('[Orientation] Server rejected or did not acknowledge report', {
+                        deviceId,
+                        eventName,
+                        error: error?.message ?? null,
+                        response
+                    });
+                    return;
+                }
+                console.info('[Orientation] Server acknowledged report', response);
+            });
+        }
+    });
     let renderer = null;
     let calibrationEnabled = false;
 
@@ -694,6 +855,13 @@ function startDisplay() {
         }
 
         totalScreens = configuredCount;
+        orientationReportingReady = true;
+        console.info('[Orientation] Device registration confirmed', {
+            deviceId,
+            screen,
+            socketConnected: socket?.connected === true
+        });
+        orientationReporter?.report(true);
         if (assignment.alignment) {
             alignmentByScreen[screen] = { ...assignment.alignment };
         }
@@ -752,6 +920,7 @@ function startDisplay() {
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
+            renderer.setSharedOrientation(sharedOrientationConfiguration);
             showPhoneControls();
             display.addEventListener('pointerdown', showPhoneControls, { passive: true });
             display.addEventListener('touchstart', showPhoneControls, { passive: true });
@@ -768,6 +937,7 @@ function startDisplay() {
             });
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
+            renderer.setSharedOrientation(sharedOrientationConfiguration);
         }
         syncDeviceAudio();
         reportDeviceStatus();
@@ -782,6 +952,7 @@ function startDisplay() {
     }
 
     function handleUnassignment() {
+        orientationReportingReady = false;
         assignedScreen = null;
         clearTimeout(controlsTimer);
         renderer?.dispose();
@@ -795,16 +966,41 @@ function startDisplay() {
         displayStatus = 'waiting';
         showStatus('Waiting for a screen assignment');
         app.replaceChildren(statusPanel);
+        syncVisionMarkerOverlay();
     }
 
     function syncVisionMarkerOverlay() {
+        markerResizeObserver?.disconnect();
+        markerResizeObserver = null;
         markerOverlay?.remove();
         markerOverlay = null;
         if (!visionMarkerMode || !display) {
             return;
         }
-        markerOverlay = createMarkerOverlay(deviceId, allocatedMarkerId);
+        markerOverlay = createDisplayMarkerOverlay({
+            deviceId,
+            markerId: allocatedMarkerId
+        });
+        if (!markerOverlay) {
+            console.error('Unable to render the assigned device ArUco marker.', {
+                deviceId,
+                markerId: allocatedMarkerId
+            });
+            return;
+        }
         display.prepend(markerOverlay);
+        const resizeOverlay = () => {
+            resizeDisplayMarkerOverlay(
+                markerOverlay,
+                display.clientWidth || globalThis.innerWidth,
+                display.clientHeight || globalThis.innerHeight
+            );
+        };
+        resizeOverlay();
+        if (typeof ResizeObserver === 'function') {
+            markerResizeObserver = new ResizeObserver(resizeOverlay);
+            markerResizeObserver.observe(display);
+        }
     }
 
     socket.on('connect', () => {
@@ -833,6 +1029,8 @@ function startDisplay() {
 
     function registerDisplayDevice() {
         showStatus('Registering device');
+        orientationReportingReady = false;
+        console.info('[Orientation] Registering persistent device ID', { deviceId });
         socket.emit('device:register', deviceId);
     }
 
@@ -916,6 +1114,18 @@ function startDisplay() {
     }
 
     socket.on('layout:update', handleLayoutUpdate);
+
+    socket.on('adaptive-rendering:update', (configuration) => {
+        renderer?.setAdaptiveRendering(configuration);
+    });
+    socket.on('shared-orientation:current', (configuration) => {
+        sharedOrientationConfiguration = configuration;
+        renderer?.setSharedOrientation(configuration);
+    });
+    socket.on('shared-orientation:update', (configuration) => {
+        sharedOrientationConfiguration = configuration;
+        renderer?.setSharedOrientation(configuration);
+    });
 
     socket.on('content:update', (content) => {
         if (!renderer) {
@@ -1003,6 +1213,7 @@ function startDisplay() {
     });
 
     socket.on('disconnect', (reason) => {
+        orientationReportingReady = false;
         showStatus(`Connecting to server - disconnected: ${reason}`);
         displayStatus = 'waiting';
         alignmentRevision = null;
@@ -1020,13 +1231,30 @@ function startDisplay() {
     window.addEventListener('pagehide', () => {
         socket.disconnect();
         renderer?.dispose();
+        orientationReporter?.dispose();
+        markerResizeObserver?.disconnect();
         clearTimeout(identifyTimer);
         clearTimeout(controlsTimer);
         if (playbackDriftTimer !== null) {
             clearInterval(playbackDriftTimer);
         }
     }, { once: true });
-    window.addEventListener('orientationchange', () => renderer?.refresh(), { passive: true });
+    window.addEventListener('resize', () => {
+        renderer?.refresh();
+        resizeDisplayMarkerOverlay(
+            markerOverlay,
+            display?.clientWidth || globalThis.innerWidth,
+            display?.clientHeight || globalThis.innerHeight
+        );
+    }, { passive: true });
+    window.addEventListener('orientationchange', () => {
+        renderer?.refresh();
+        resizeDisplayMarkerOverlay(
+            markerOverlay,
+            display?.clientWidth || globalThis.innerWidth,
+            display?.clientHeight || globalThis.innerHeight
+        );
+    }, { passive: true });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
 }

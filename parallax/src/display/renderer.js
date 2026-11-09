@@ -12,6 +12,7 @@ import {
     correctPlaybackDrift,
     expectedPlaybackPosition
 } from '../media/playback.js';
+import { createAdaptiveRenderTriangles } from './adaptive-rendering.js';
 import { DEFAULT_AUDIO_SETTINGS, getDeviceAudioState } from '../media/audio.js';
 import { resolveParallaxMediaUrl } from '../core/media-url.js';
 
@@ -65,6 +66,8 @@ export function createContentRenderer({
     let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
     let screenFillEnabled = true;
     let fitMode = 'cover';
+    let adaptiveRendering = null;
+    let sharedOrientation = null;
     let layout = createDefaultLayout(totalScreens);
     let screenEnabled = true;
     let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
@@ -222,7 +225,13 @@ export function createContentRenderer({
         const imageHeight = image.naturalHeight || image.videoHeight || image.height;
         context.clearRect(0, 0, canvas.width, canvas.height);
         context.save();
-        if (screenFillEnabled && fitMode !== 'manual') {
+        const adaptiveViewport = adaptiveRendering?.active
+            && adaptiveRendering.devices?.find((viewport) =>
+                viewport.deviceId === deviceId && viewport.screen === activeScreen);
+        const adaptiveDrawn = Boolean(adaptiveViewport && screenFillEnabled && fitMode !== 'manual'
+            && adaptiveRendering.fitMode === fitMode
+            && drawAdaptiveViewport(context, image, adaptiveViewport, imageWidth, imageHeight));
+        if (!adaptiveDrawn && screenFillEnabled && fitMode !== 'manual') {
             const geometry = getActiveGeometry();
             const transform = calculateWallTransform(
                 layout,
@@ -240,7 +249,7 @@ export function createContentRenderer({
             );
             context.scale(transform.scaleX, transform.scaleY);
             context.drawImage(image, 0, 0);
-        } else {
+        } else if (!adaptiveDrawn) {
             const region = calculateSourceRegion(layout, activeScreen, imageWidth, imageHeight);
             const rotation = region.rotation * Math.PI / 180;
             const rotatedAspect = region.rotation % 180 === 0
@@ -281,6 +290,84 @@ export function createContentRenderer({
             calibrationOverlay.hidden = !calibrationEnabled;
         }
         updateCalibrationPosition();
+    }
+
+    function drawAdaptiveViewport(context, image, viewport, imageWidth, imageHeight) {
+        const triangles = createAdaptiveRenderTriangles({
+            viewport,
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+            imageWidth,
+            imageHeight,
+            sharedFrame: adaptiveRendering.sharedFrame,
+            fitMode,
+            sharedOrientation: sharedOrientation?.renderingActive === true
+                && ['landscape', 'portrait'].includes(sharedOrientation.orientation)
+                ? sharedOrientation.orientation
+                : null
+        });
+        if (!triangles) {
+            return false;
+        }
+
+        context.save();
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.fillStyle = '#000';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        for (const triangle of triangles) {
+            const [first, second, third] = triangle;
+            const sourceX = [first.source.x, second.source.x, third.source.x];
+            const sourceY = [first.source.y, second.source.y, third.source.y];
+            const minX = Math.max(0, Math.min(...sourceX));
+            const maxX = Math.min(imageWidth, Math.max(...sourceX));
+            const minY = Math.max(0, Math.min(...sourceY));
+            const maxY = Math.min(imageHeight, Math.max(...sourceY));
+            if (maxX - minX < 1e-6 || maxY - minY < 1e-6) {
+                continue;
+            }
+
+            const x1 = second.source.x - first.source.x;
+            const y1 = second.source.y - first.source.y;
+            const x2 = third.source.x - first.source.x;
+            const y2 = third.source.y - first.source.y;
+            const determinant = x1 * y2 - x2 * y1;
+            if (Math.abs(determinant) < 1e-8) {
+                continue;
+            }
+            const dx1 = second.destination.x - first.destination.x;
+            const dy1 = second.destination.y - first.destination.y;
+            const dx2 = third.destination.x - first.destination.x;
+            const dy2 = third.destination.y - first.destination.y;
+            const a = (dx1 * y2 - dx2 * y1) / determinant;
+            const c = (x1 * dx2 - x2 * dx1) / determinant;
+            const b = (dy1 * y2 - dy2 * y1) / determinant;
+            const d = (x1 * dy2 - x2 * dy1) / determinant;
+            const e = first.destination.x - a * first.source.x - c * first.source.y;
+            const f = first.destination.y - b * first.source.x - d * first.source.y;
+
+            context.save();
+            context.beginPath();
+            context.moveTo(first.destination.x, first.destination.y);
+            context.lineTo(second.destination.x, second.destination.y);
+            context.lineTo(third.destination.x, third.destination.y);
+            context.closePath();
+            context.clip();
+            context.setTransform(a, b, c, d, e, f);
+            context.drawImage(
+                image,
+                minX,
+                minY,
+                maxX - minX,
+                maxY - minY,
+                minX,
+                minY,
+                maxX - minX,
+                maxY - minY
+            );
+            context.restore();
+        }
+        context.restore();
+        return true;
     }
 
     function isManualMode() {
@@ -991,6 +1078,59 @@ export function createContentRenderer({
         }
         screenFillEnabled = settings.enabled;
         fitMode = settings.fitMode;
+        redraw();
+        return true;
+    };
+
+    render.setAdaptiveRendering = (configuration) => {
+        if (!configuration || typeof configuration !== 'object'
+            || !Number.isInteger(configuration.version)
+            || typeof configuration.active !== 'boolean') {
+            adaptiveRendering = null;
+            redraw();
+            return false;
+        }
+        if (!configuration.active) {
+            adaptiveRendering = configuration;
+            redraw();
+            return true;
+        }
+        const viewport = configuration.devices?.find((entry) =>
+            entry.deviceId === deviceId && entry.screen === activeScreen);
+        const validMesh = viewport && createAdaptiveRenderTriangles({
+            viewport,
+            canvasWidth: 1,
+            canvasHeight: 1,
+            imageWidth: 1,
+            imageHeight: 1,
+            sharedFrame: configuration.sharedFrame,
+            fitMode: configuration.fitMode
+        });
+        if (!validMesh) {
+            adaptiveRendering = {
+                ...configuration,
+                active: false,
+                reason: 'invalid-device-viewport'
+            };
+            redraw();
+            return false;
+        }
+        adaptiveRendering = configuration;
+        redraw();
+        return true;
+    };
+
+    render.setSharedOrientation = (configuration) => {
+        if (!configuration || typeof configuration !== 'object'
+            || !Number.isInteger(configuration.version)
+            || !['AUTO', 'LANDSCAPE', 'PORTRAIT', 'MANUAL'].includes(configuration.mode)
+            || (configuration.orientation !== null
+                && !['landscape', 'portrait'].includes(configuration.orientation))) {
+            sharedOrientation = null;
+            redraw();
+            return false;
+        }
+        sharedOrientation = configuration;
         redraw();
         return true;
     };

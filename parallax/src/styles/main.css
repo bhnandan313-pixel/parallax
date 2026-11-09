@@ -220,45 +220,36 @@ body,
 
 .parallax-vision-marker {
     position: absolute;
-    top: max(12px, env(safe-area-inset-top));
-    left: max(12px, env(safe-area-inset-left));
+    top: 50%;
+    left: 50%;
     z-index: 25;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 8px;
-    border: 2px solid rgba(255, 255, 255, 0.9);
-    border-radius: 12px;
-    background: rgba(0, 0, 0, 0.72);
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+    aspect-ratio: 1;
+    background: #fff;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
 }
 
 .parallax-vision-marker-grid {
     display: block;
-    width: min(32vw, 224px);
-    height: min(32vw, 224px);
+    width: 100%;
+    height: 100%;
     image-rendering: pixelated;
     background: #fff;
 }
 
-.parallax-vision-marker-cell {
-    display: block;
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    background: #fff;
-}
-
-.parallax-vision-marker-cell.is-filled {
-    background: #0f172a;
-}
-
 .parallax-vision-marker-label {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.8);
     color: #fff;
+    transform: translateX(-50%);
     font: 700 10px Arial, sans-serif;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+    white-space: nowrap;
 }
 
 .vision-camera-shell {
@@ -515,6 +506,77 @@ body,
 .vision-camera-marker-overlay {
     width: 100%;
     height: 100%;
+}
+
+.vision-surface-capture {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(2, 6, 9, 0.78), transparent 30%, transparent 65%, rgba(2, 6, 9, 0.82));
+    color: #f8fafc;
+    font-size: 11px;
+    pointer-events: none;
+}
+
+.vision-surface-capture[hidden] {
+    display: none;
+}
+
+.vision-surface-capture > strong,
+.vision-surface-capture > span {
+    position: relative;
+    z-index: 2;
+    align-self: flex-start;
+    padding: 5px 7px;
+    border-radius: 5px;
+    background: rgba(2, 6, 9, 0.78);
+}
+
+.vision-surface-capture-points {
+    position: absolute;
+    inset: 0;
+}
+
+.vision-surface-capture-point {
+    position: absolute;
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    background: #7c3aed;
+    color: white;
+    font-weight: 700;
+    transform: translate(-50%, -50%);
+}
+
+.vision-surface-capture-actions {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: auto;
+    pointer-events: auto;
+}
+
+.vision-surface-capture-actions button {
+    min-height: 34px;
+    padding: 6px 9px;
+    border: 1px solid #64748b;
+    border-radius: 6px;
+    background: #111827e8;
+    color: #f8fafc;
+    font: inherit;
+}
+
+.vision-surface-capture-actions button:disabled {
+    opacity: 0.55;
 }
 
 .vision-camera-overlay {

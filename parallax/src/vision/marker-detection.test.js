@@ -8,17 +8,81 @@ import {
     calculateRelativeArrangement,
     computeMarkerIdForDevice,
     createPersistentMarkerAssignments,
+    createSpatialRelationshipState,
+    createVisionTrackerState,
     createArucoMarkerPattern,
     createDefaultVisionCalibration,
     detectMarkersFromImageData,
     normalizeMarkerObservation,
     saveVisionCalibration,
+    updateSpatialRelationship,
+    updateVisionTracker,
     validateMarkerObservation,
     validateVisionCalibration
 } from './marker-detection.js';
 import { renderArucoMarker } from './marker-renderer.js';
 
 const { AR } = jsAruco;
+
+function trackedObservation(deviceId, markerId, centerX, centerY, orientationAngle, width = 0.1, height = 0.1) {
+    return {
+        deviceId,
+        id: markerId,
+        markerId,
+        centerX,
+        centerY,
+        normalizedCenter: { x: centerX, y: centerY },
+        corners: [],
+        width,
+        height,
+        orientationAngle,
+        rotation: orientationAngle,
+        confidence: 0.9,
+        isVisible: true
+    };
+}
+
+function relationshipPair({
+    firstId = 'device-a',
+    secondId = 'device-b',
+    first = { x: 0.2, y: 0.5, angle: 0, confidence: 0.9, width: 0.12, height: 0.12 },
+    second = { x: 0.7, y: 0.5, angle: 0, confidence: 0.9, width: 0.18, height: 0.18 },
+    timestamp = 1000
+} = {}) {
+    return [
+        {
+            deviceId: firstId,
+            markerId: 21,
+            centerX: first.x,
+            centerY: first.y,
+            width: first.width,
+            height: first.height,
+            orientationAngle: first.angle,
+            confidence: first.confidence,
+            isVisible: true,
+            timestamp
+        },
+        {
+            deviceId: secondId,
+            markerId: 463,
+            centerX: second.x,
+            centerY: second.y,
+            width: second.width,
+            height: second.height,
+            orientationAngle: second.angle,
+            confidence: second.confidence,
+            isVisible: true,
+            timestamp
+        }
+    ];
+}
+
+function stableRelationship(pair, deviceIds = ['device-a', 'device-b'], options = {}) {
+    const state = createSpatialRelationshipState();
+    updateSpatialRelationship(state, pair, deviceIds, 1000, options);
+    const result = updateSpatialRelationship(state, pair, deviceIds, 1600, options);
+    return { state, result };
+}
 
 function createSyntheticMarkerImage(markerDefinitions, width = 640, height = 480, moduleSize = 20) {
     const data = new Uint8ClampedArray(width * height * 4);
@@ -33,14 +97,15 @@ function createSyntheticMarkerImage(markerDefinitions, width = 640, height = 480
         const pattern = createArucoMarkerPattern(marker.id);
         const left = Math.max(0, Math.round(marker.left));
         const top = Math.max(0, Math.round(marker.top));
+        const markerModuleSize = marker.moduleSize ?? moduleSize;
         for (let row = 0; row < pattern.length; row += 1) {
             for (let column = 0; column < pattern[row].length; column += 1) {
                 const isBlack = pattern[row][column] === 0;
                 if (!isBlack) {
                     continue;
                 }
-                for (let y = row * moduleSize; y < (row + 1) * moduleSize; y += 1) {
-                    for (let x = column * moduleSize; x < (column + 1) * moduleSize; x += 1) {
+                for (let y = row * markerModuleSize; y < (row + 1) * markerModuleSize; y += 1) {
+                    for (let x = column * markerModuleSize; x < (column + 1) * markerModuleSize; x += 1) {
                         const offset = ((top + y) * width + left + x) * 4;
                         data[offset] = 0;
                         data[offset + 1] = 0;
@@ -279,6 +344,11 @@ test('normalizes and validates marker observations without inventing missing val
     assert.equal(marker.id, 21);
     assert.equal(marker.visible, true);
     assert.equal(Number.isFinite(marker.rotation), true);
+    assert.equal(marker.centerX, marker.normalizedCenter.x);
+    assert.equal(marker.centerY, marker.normalizedCenter.y);
+    assert.ok(marker.width > 0 && marker.width <= 1);
+    assert.ok(marker.height > 0 && marker.height <= 1);
+    assert.equal(marker.orientationAngle, marker.rotation);
     assert.equal(validateMarkerObservation({
         id: 14,
         corners: [
@@ -328,6 +398,306 @@ test('associates valid marker IDs to registered devices and rejects duplicates',
     assert.equal(associated.length, 2);
     assert.equal(associated[0].deviceName, 'Left Phone');
     assert.equal(associateMarkerWithDevice({ id: 9999 }, registeredDevices), null);
+});
+
+test('tracks two detected markers independently when detection and registration order differ', () => {
+    const detected = detectSyntheticMarkers([
+        { id: 21, left: 40, top: 70, moduleSize: 8 },
+        { id: 463, left: 350, top: 250, moduleSize: 18 }
+    ]);
+    assert.equal(detected.length, 2);
+    const detectedWidths = new Map(detected.map(({ id, corners }) => [
+        id,
+        Math.max(...corners.map(({ x }) => x)) - Math.min(...corners.map(({ x }) => x))
+    ]));
+    assert.ok(detectedWidths.get(21) < detectedWidths.get(463));
+
+    const registeredDevices = [
+        { id: 'phone-two', markerId: 463 },
+        { id: 'phone-one', markerId: 21 }
+    ];
+    const associated = associateMarkersWithDevices(detected, registeredDevices);
+    assert.deepEqual(
+        associated.map(({ deviceId }) => deviceId).sort(),
+        ['phone-one', 'phone-two']
+    );
+    assert.equal(associated.find(({ id }) => id === 21).deviceId, 'phone-one');
+    assert.equal(associated.find(({ id }) => id === 463).deviceId, 'phone-two');
+
+    const tracker = createVisionTrackerState();
+    const observations = updateVisionTracker(tracker, [
+        trackedObservation('phone-two', 463, 0.72, 0.68, 0.8, 0.18, 0.2),
+        trackedObservation('phone-one', 21, 0.18, 0.25, -0.3, 0.08, 0.1)
+    ], 1000);
+    assert.equal(observations.length, 2);
+    assert.equal(tracker.devices.get('phone-one').markerId, 21);
+    assert.equal(tracker.devices.get('phone-two').markerId, 463);
+    assert.deepEqual(
+        [tracker.devices.get('phone-one').centerX, tracker.devices.get('phone-one').centerY],
+        [0.18, 0.25]
+    );
+    assert.deepEqual(
+        [tracker.devices.get('phone-two').centerX, tracker.devices.get('phone-two').centerY],
+        [0.72, 0.68]
+    );
+    assert.notEqual(
+        tracker.devices.get('phone-one').orientationAngle,
+        tracker.devices.get('phone-two').orientationAngle
+    );
+    assert.notEqual(tracker.devices.get('phone-one').width, tracker.devices.get('phone-two').width);
+});
+
+test('keeps one device visible and the other at its last position during temporary occlusion', () => {
+    const tracker = createVisionTrackerState();
+    updateVisionTracker(tracker, [
+        trackedObservation('phone-one', 21, 0.2, 0.3, 0.1),
+        trackedObservation('phone-two', 463, 0.8, 0.7, -0.2)
+    ], 1000);
+
+    const observations = updateVisionTracker(tracker, [
+        trackedObservation('phone-one', 21, 0.3, 0.4, 0.2)
+    ], 1250);
+    const phoneOne = observations.find(({ deviceId }) => deviceId === 'phone-one');
+    const phoneTwo = observations.find(({ deviceId }) => deviceId === 'phone-two');
+
+    assert.equal(phoneOne.isVisible, true);
+    assert.equal(phoneOne.trackingState, 'tracked');
+    assert.equal(phoneTwo.isVisible, false);
+    assert.equal(phoneTwo.trackingState, 'occluded');
+    assert.deepEqual([phoneTwo.centerX, phoneTwo.centerY], [0.8, 0.7]);
+    assert.equal(phoneTwo.timestamp, 1000);
+});
+
+test('marks both missing markers lost and expires stale observations', () => {
+    const tracker = createVisionTrackerState();
+    updateVisionTracker(tracker, [
+        trackedObservation('phone-one', 21, 0.2, 0.3, 0),
+        trackedObservation('phone-two', 463, 0.8, 0.7, 0)
+    ], 1000);
+
+    const lost = updateVisionTracker(tracker, [], 2600);
+    assert.equal(lost.length, 2);
+    assert.ok(lost.every(({ isVisible, trackingState }) =>
+        isVisible === false && trackingState === 'lost'));
+
+    const expired = updateVisionTracker(tracker, [], 11000);
+    assert.deepEqual(expired, []);
+    assert.equal(tracker.devices.size, 0);
+});
+
+test('reacquires a lost marker at its new position without carrying stale smoothing forward', () => {
+    const tracker = createVisionTrackerState();
+    updateVisionTracker(tracker, [
+        trackedObservation('phone-one', 21, 0.2, 0.3, 0.1),
+        trackedObservation('phone-two', 463, 0.8, 0.7, -0.2)
+    ], 1000);
+
+    const reacquired = updateVisionTracker(tracker, [
+        trackedObservation('phone-two', 463, 0.35, 0.45, 0.6)
+    ], 2800);
+    const phoneOne = reacquired.find(({ deviceId }) => deviceId === 'phone-one');
+    const phoneTwo = reacquired.find(({ deviceId }) => deviceId === 'phone-two');
+    assert.equal(phoneOne.trackingState, 'lost');
+    assert.equal(phoneTwo.trackingState, 'tracked');
+    assert.equal(phoneTwo.isVisible, true);
+    assert.deepEqual([phoneTwo.centerX, phoneTwo.centerY], [0.35, 0.45]);
+    assert.equal(phoneTwo.orientationAngle, 0.6);
+});
+
+test('unknown and incorrect marker IDs do not create or overwrite device tracks', () => {
+    const knownMarkerId = computeMarkerIdForDevice('phone-one');
+    const associated = associateMarkersWithDevices([
+        { id: 999, centerX: 0.7, centerY: 0.5 },
+        { id: knownMarkerId, centerX: 0.2, centerY: 0.5 }
+    ], [{ id: 'phone-one', markerId: knownMarkerId }]);
+    assert.deepEqual(associated.map(({ deviceId }) => deviceId), ['phone-one']);
+
+    const tracker = createVisionTrackerState();
+    const tracked = updateVisionTracker(tracker, [
+        trackedObservation('phone-one', knownMarkerId, 0.2, 0.5, 0)
+    ], 1000);
+    assert.equal(tracked.length, 1);
+    assert.equal(tracker.devices.has('phone-two'), false);
+    assert.equal(tracker.devices.get('phone-one').centerX, 0.2);
+});
+
+test('classifies side-by-side devices with camera-relative displacement and marker scale ratio', () => {
+    const pair = relationshipPair({
+        first: { x: 0.15, y: 0.45, angle: 0, confidence: 0.9, width: 0.1, height: 0.1 },
+        second: { x: 0.62, y: 0.48, angle: 0.05, confidence: 0.85, width: 0.2, height: 0.2 }
+    });
+    const { result } = stableRelationship(pair);
+    assert.equal(result.classification, 'SIDE_BY_SIDE');
+    assert.equal(result.arrangement, 'SIDE_BY_SIDE');
+    assert.equal(result.orientation, 'PARALLEL');
+    assert.equal(result.relativeHorizontal, 0.47);
+    assert.equal(result.relativeVertical, 0.03);
+    assert.equal(result.markerScaleRatio, 2);
+    assert.equal(result.coordinateSpace, 'normalized-camera-image');
+});
+
+test('classifies stacked devices independent of which device was registered first', () => {
+    const pair = relationshipPair({
+        firstId: 'upper-device',
+        secondId: 'lower-device',
+        first: { x: 0.5, y: 0.18, angle: 0, confidence: 0.9 },
+        second: { x: 0.52, y: 0.7, angle: 0, confidence: 0.9 }
+    });
+    const { result } = stableRelationship(pair, ['upper-device', 'lower-device']);
+    assert.equal(result.classification, 'STACKED');
+    assert.equal(result.arrangement, 'STACKED');
+    assert.deepEqual(result.deviceIds, ['upper-device', 'lower-device']);
+});
+
+test('flags reversed left-to-right order without changing device identity', () => {
+    const pair = relationshipPair({
+        firstId: 'registered-first',
+        secondId: 'registered-second',
+        first: { x: 0.78, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.28, y: 0.51, angle: 0, confidence: 0.9 }
+    });
+    const { result } = stableRelationship(pair, ['registered-first', 'registered-second']);
+    assert.equal(result.classification, 'REVERSED');
+    assert.equal(result.arrangement, 'SIDE_BY_SIDE');
+    assert.equal(result.reversed, true);
+    assert.deepEqual(result.deviceIds, ['registered-first', 'registered-second']);
+    assert.equal(result.relativeHorizontal, -0.5);
+});
+
+test('reports relative orientation separately from side-by-side arrangement', () => {
+    const pair = relationshipPair({
+        first: { x: 0.2, y: 0.5, angle: -0.05, confidence: 0.9 },
+        second: { x: 0.65, y: 0.5, angle: 0.55, confidence: 0.9 }
+    });
+    const { result } = stableRelationship(pair);
+    assert.equal(result.classification, 'ANGLED');
+    assert.equal(result.arrangement, 'SIDE_BY_SIDE');
+    assert.equal(result.orientation, 'ANGLED');
+    assert.ok(result.relativeOrientationAngle > 0.5);
+});
+
+test('classifies devices beyond the normalized separation threshold as separated', () => {
+    const pair = relationshipPair({
+        first: { x: 0.08, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.9, y: 0.5, angle: 0, confidence: 0.9 }
+    });
+    const { result } = stableRelationship(pair);
+    assert.equal(result.classification, 'SEPARATED');
+    assert.equal(result.arrangement, 'SEPARATED');
+    assert.ok(result.relativeDistance >= 0.65);
+});
+
+test('returns UNKNOWN for missing, stale, or low-confidence pair observations', () => {
+    const state = createSpatialRelationshipState();
+    const pair = relationshipPair();
+    const missing = updateSpatialRelationship(state, pair.slice(0, 1), ['device-a', 'device-b'], 1000);
+    assert.equal(missing.classification, 'UNKNOWN');
+    assert.equal(missing.relativeDistance, null);
+
+    const lowConfidence = relationshipPair({
+        first: { x: 0.2, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.7, y: 0.5, angle: 0, confidence: 0.2 }
+    });
+    const low = updateSpatialRelationship(state, lowConfidence, ['device-a', 'device-b'], 1200);
+    assert.equal(low.classification, 'UNKNOWN');
+    assert.match(low.reason, /low-confidence|missing/);
+
+    const stale = updateSpatialRelationship(state, pair, ['device-a', 'device-b'], 5000);
+    assert.equal(stale.classification, 'UNKNOWN');
+});
+
+test('requires a new stable interval after a pair loses reliable tracking', () => {
+    const state = createSpatialRelationshipState();
+    const ids = ['device-a', 'device-b'];
+    const pair = relationshipPair();
+    updateSpatialRelationship(state, pair, ids, 1000);
+    assert.equal(updateSpatialRelationship(state, pair, ids, 1600).classification, 'SIDE_BY_SIDE');
+
+    const lost = updateSpatialRelationship(state, pair.slice(0, 1), ids, 1700);
+    assert.equal(lost.classification, 'UNKNOWN');
+    const reacquired = relationshipPair({ timestamp: 1800 });
+    assert.equal(updateSpatialRelationship(state, reacquired, ids, 1800).classification, 'UNKNOWN');
+    assert.equal(updateSpatialRelationship(state, reacquired, ids, 2300).classification, 'SIDE_BY_SIDE');
+});
+
+test('holds stable classification through noisy boundary measurements', () => {
+    const state = createSpatialRelationshipState();
+    const ids = ['device-a', 'device-b'];
+    const sideBySide = relationshipPair({
+        first: { x: 0.2, y: 0.4, angle: 0, confidence: 0.9 },
+        second: { x: 0.65, y: 0.4, angle: 0, confidence: 0.9 }
+    });
+    updateSpatialRelationship(state, sideBySide, ids, 1000, { alpha: 0.9 });
+    assert.equal(updateSpatialRelationship(state, sideBySide, ids, 1600, { alpha: 0.9 }).arrangement, 'SIDE_BY_SIDE');
+
+    for (const [timestamp, dx, dy] of [
+        [1700, 0.24, 0.22],
+        [1900, 0.22, 0.24],
+        [2100, 0.24, 0.22],
+        [2300, 0.45, 0]
+    ]) {
+        const noisy = relationshipPair({
+            first: { x: 0.2, y: 0.4, angle: 0, confidence: 0.9 },
+            second: { x: 0.2 + dx, y: 0.4 + dy, angle: 0, confidence: 0.9 },
+            timestamp
+        });
+        const result = updateSpatialRelationship(state, noisy, ids, timestamp, { alpha: 0.9 });
+        assert.equal(result.arrangement, 'SIDE_BY_SIDE');
+    }
+});
+
+test('accepts sustained arrangement changes after the hysteresis duration', () => {
+    const state = createSpatialRelationshipState();
+    const ids = ['device-a', 'device-b'];
+    const sideBySide = relationshipPair({
+        first: { x: 0.2, y: 0.2, angle: 0, confidence: 0.9 },
+        second: { x: 0.65, y: 0.2, angle: 0, confidence: 0.9 }
+    });
+    updateSpatialRelationship(state, sideBySide, ids, 1000, { alpha: 0.9 });
+    assert.equal(updateSpatialRelationship(state, sideBySide, ids, 1600, { alpha: 0.9 }).arrangement, 'SIDE_BY_SIDE');
+
+    const stacked = relationshipPair({
+        first: { x: 0.2, y: 0.2, angle: 0, confidence: 0.9 },
+        second: { x: 0.22, y: 0.72, angle: 0, confidence: 0.9 }
+    });
+    const candidate = updateSpatialRelationship(state, stacked, ids, 1700, { alpha: 0.9 });
+    assert.equal(candidate.arrangement, 'SIDE_BY_SIDE');
+    const changed = updateSpatialRelationship(state, stacked, ids, 2300, { alpha: 0.9 });
+    assert.equal(changed.arrangement, 'STACKED');
+    assert.equal(changed.classification, 'STACKED');
+});
+
+test('reports one device moving closer while preserving the other device identity', () => {
+    const state = createSpatialRelationshipState();
+    const ids = ['stationary-device', 'moving-device'];
+    const pair = relationshipPair({
+        firstId: ids[0],
+        secondId: ids[1],
+        first: { x: 0.2, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.7, y: 0.5, angle: 0, confidence: 0.9 }
+    });
+    updateSpatialRelationship(state, pair, ids, 1000);
+    updateSpatialRelationship(state, pair, ids, 1600);
+    const closer = relationshipPair({
+        firstId: ids[0],
+        secondId: ids[1],
+        first: { x: 0.2, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.58, y: 0.5, angle: 0, confidence: 0.9 },
+        timestamp: 1700
+    });
+    const result = updateSpatialRelationship(state, closer, ids, 1700);
+    assert.equal(result.movement, 'CLOSER');
+    assert.deepEqual(result.deviceIds, ids);
+    assert.ok(result.relativeHorizontal < 0.5);
+
+    const farther = relationshipPair({
+        firstId: ids[0],
+        secondId: ids[1],
+        first: { x: 0.2, y: 0.5, angle: 0, confidence: 0.9 },
+        second: { x: 0.9, y: 0.5, angle: 0, confidence: 0.9 },
+        timestamp: 1800
+    });
+    assert.equal(updateSpatialRelationship(state, farther, ids, 1800).movement, 'FARTHER');
 });
 
 test('stores calibration settings and rejects invalid data gracefully', () => {

@@ -18,20 +18,25 @@ function defaultScreens(count = 12) {
 
 function storedSettings({ calibrationEnabled = false, screens = {}, assignments = {},
     markerAssignments = {},
+    surfaceCalibrations = {},
     totalScreens = 2, assignmentMode = 'automatic', presets = [],
     layout = defaultLayout(totalScreens), layoutPresets = [],
-    screenFillEnabled = true, fitMode = 'cover' } = {}) {
+    screenFillEnabled = true, fitMode = 'cover',
+    adaptiveRenderingEnabled = false, orientationMode = 'MANUAL' } = {}) {
     return {
         calibrationEnabled,
         totalScreens,
         assignmentMode,
         assignments,
         markerAssignments,
+        surfaceCalibrations,
         screens: { ...defaultScreens(), ...screens },
         presets,
         layout,
         screenFillEnabled,
         fitMode,
+        adaptiveRenderingEnabled,
+        orientationMode,
         layoutPresets
     };
 }
@@ -199,8 +204,74 @@ test('creates and validates temporary vision camera sessions', async () => {
             status: 'connected'
         });
 
+        const cornerSets = [
+            {
+                deviceId: 'vision-display-test',
+                corners: [
+                    { x: 0.1, y: 0.2 }, { x: 0.45, y: 0.2 },
+                    { x: 0.45, y: 0.8 }, { x: 0.1, y: 0.8 }
+                ]
+            },
+            {
+                deviceId: 'vision-display-late',
+                corners: [
+                    { x: 0.45, y: 0.2 }, { x: 0.9, y: 0.2 },
+                    { x: 0.9, y: 0.8 }, { x: 0.45, y: 0.8 }
+                ]
+            }
+        ];
+        let lastSurfaceSave;
+        for (const { deviceId, corners } of cornerSets) {
+            const cameraCaptureRequest = new Promise((resolve) => {
+                camera.once('screen-surface:calibration:request', resolve);
+            });
+            assert.equal((await emitAck(controller, 'screen-surface:calibration:start', {
+                deviceId
+            })).ok, true);
+            assert.deepEqual(await cameraCaptureRequest, { deviceId });
+            assert.equal((await emitAck(camera, 'screen-surface:calibration:capture', {
+                deviceId,
+                corners: [{ x: 0.1, y: 0.1 }]
+            })).ok, false);
+            const forwardedCapture = new Promise((resolve) => {
+                controller.once('screen-surface:calibration:capture', resolve);
+            });
+            assert.equal((await emitAck(camera, 'screen-surface:calibration:capture', {
+                deviceId,
+                corners
+            })).ok, true);
+            const captured = await forwardedCapture;
+            assert.equal(captured.deviceId, deviceId);
+            lastSurfaceSave = await emitAck(controller, 'screen-surface:calibration:save', {
+                ...captured,
+                confidence: 0.85
+            });
+            assert.equal(lastSurfaceSave.ok, true);
+        }
+        assert.equal(lastSurfaceSave.viewports.valid, true);
+        assert.equal(lastSurfaceSave.viewports.arrangement, 'SIDE_BY_SIDE');
+        const persistedSettings = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        assert.deepEqual(Object.keys(persistedSettings.surfaceCalibrations).sort(), [
+            'vision-display-late',
+            'vision-display-test'
+        ]);
+        assert.equal(persistedSettings.markerAssignments['vision-display-test'],
+            computeMarkerIdForDevice('vision-display-test'));
+        assert.equal((await emitAck(display.socket, 'screen-surface:calibration:save', {
+            deviceId: 'vision-display-test',
+            corners: cornerSets[0].corners,
+            confidence: 0.8
+        })).ok, false);
+
+        const deviceMappingUpdates = Promise.all([display.socket, lateDisplay].map((deviceSocket) =>
+            new Promise((resolve) => {
+                deviceSocket.once('spatial:mapping:update', resolve);
+            })));
         let latestState;
-        for (const [x, y, rotation] of [[0.25, 0.5, 0.1], [0.55, 0.35, 0.4]]) {
+        for (const [index, [x, y, rotation]] of [[0.25, 0.5, 0.1], [0.55, 0.35, 0.4]].entries()) {
+            if (index > 0) {
+                await new Promise((resolve) => setTimeout(resolve, 550));
+            }
             latestState = await new Promise((resolve) => {
                 const onUpdate = (payload) => {
                     controller.off('vision:camera:update', onUpdate);
@@ -209,26 +280,88 @@ test('creates and validates temporary vision camera sessions', async () => {
                 controller.on('vision:camera:update', onUpdate);
                 camera.emit('vision:camera:report', {
                     frame: { width: 320, height: 240, sourceWidth: 1280, sourceHeight: 720 },
-                    markers: [{
-                        id: computeMarkerIdForDevice('vision-display-test'),
-                        x,
-                        y,
-                        normalizedCenter: { x, y },
-                        rotation,
-                        confidence: 0.9,
-                        visible: true,
-                        timestamp: Date.now(),
-                        deviceId: 'vision-display-test'
-                    }]
+                    markers: [
+                        {
+                            id: computeMarkerIdForDevice('vision-display-test'),
+                            x,
+                            y,
+                            normalizedCenter: { x, y },
+                            corners: [
+                                { x: x - 0.05, y: y - 0.05 },
+                                { x: x + 0.05, y: y - 0.05 },
+                                { x: x + 0.05, y: y + 0.05 },
+                                { x: x - 0.05, y: y + 0.05 }
+                            ],
+                            width: 0.1,
+                            height: 0.1,
+                            rotation,
+                            orientationAngle: rotation,
+                            confidence: 0.9,
+                            visible: true,
+                            timestamp: Date.now(),
+                            deviceId: 'vision-display-test'
+                        },
+                        {
+                            id: computeMarkerIdForDevice('vision-display-late'),
+                            x: 0.8,
+                            y: 0.2,
+                            normalizedCenter: { x: 0.8, y: 0.2 },
+                            corners: [
+                                { x: 0.75, y: 0.15 },
+                                { x: 0.85, y: 0.15 },
+                                { x: 0.85, y: 0.25 },
+                                { x: 0.75, y: 0.25 }
+                            ],
+                            width: 0.1,
+                            height: 0.1,
+                            rotation: -0.3,
+                            confidence: 0.7,
+                            visible: true,
+                            timestamp: Date.now(),
+                            deviceId: 'vision-display-late'
+                        }
+                    ]
                 });
             });
         }
+        const [firstDeviceMapping, secondDeviceMapping] = await deviceMappingUpdates;
+        assert.equal(firstDeviceMapping.valid, true);
+        assert.equal(secondDeviceMapping.valid, true);
+        assert.deepEqual(
+            firstDeviceMapping.devices.map(({ deviceId }) => deviceId),
+            ['vision-display-late', 'vision-display-test']
+        );
+        assert.deepEqual(secondDeviceMapping, firstDeviceMapping);
         assert.equal(latestState.status, 'tracking');
-        assert.equal(latestState.markers[0].id, computeMarkerIdForDevice('vision-display-test'));
-        assert.ok(latestState.markers[0].relativeX > 0.25);
-        assert.ok(latestState.markers[0].relativeY < 0.5);
-        assert.ok(latestState.markers[0].timestamp <= Date.now());
+        assert.equal(latestState.spatialMappingValid, true);
+        assert.equal(latestState.spatialMapping.valid, true);
+        assert.equal(latestState.markers.length, 2);
+        const observedByDevice = new Map(latestState.markers.map((marker) => [marker.deviceId, marker]));
+        const firstPhone = observedByDevice.get('vision-display-test');
+        const secondPhone = observedByDevice.get('vision-display-late');
+        assert.equal(firstPhone.markerId, computeMarkerIdForDevice('vision-display-test'));
+        assert.equal(secondPhone.markerId, computeMarkerIdForDevice('vision-display-late'));
+        assert.ok(firstPhone.centerX > 0.25);
+        assert.ok(firstPhone.centerY < 0.5);
+        assert.deepEqual([secondPhone.centerX, secondPhone.centerY], [0.8, 0.2]);
+        assert.equal(secondPhone.orientationAngle, -0.3);
+        assert.equal(firstPhone.width, 0.1);
+        assert.equal(secondPhone.height, 0.1);
+        assert.ok(firstPhone.timestamp <= Date.now());
+        assert.equal(firstPhone.isVisible, true);
+        assert.equal(secondPhone.isVisible, true);
+        assert.deepEqual(latestState.relationship.deviceIds, [
+            'vision-display-test',
+            'vision-display-late'
+        ]);
+        assert.ok([
+            'SIDE_BY_SIDE', 'STACKED', 'ANGLED', 'REVERSED', 'SEPARATED', 'UNKNOWN'
+        ].includes(latestState.relationship.classification));
+        assert.equal(latestState.relationship.coordinateSpace, 'normalized-camera-image');
 
+        const oneMarkerUpdate = new Promise((resolve) => {
+            controller.once('vision:camera:update', resolve);
+        });
         const reportDiagnostics = await new Promise((resolve) => {
             camera.emit('vision:camera:report', {
                 markers: [{
@@ -240,6 +373,9 @@ test('creates and validates temporary vision camera sessions', async () => {
                 }]
             }, resolve);
         });
+        const oneMarkerState = await oneMarkerUpdate;
+        assert.equal(oneMarkerState.spatialMappingValid, false);
+        assert.equal(Object.hasOwn(oneMarkerState, 'spatialMapping'), false);
         assert.deepEqual(
             reportDiagnostics.registeredMarkers.map(({ deviceId }) => deviceId).sort(),
             ['vision-display-late', 'vision-display-test']
@@ -259,6 +395,223 @@ test('creates and validates temporary vision camera sessions', async () => {
             camera.emit('vision:camera:disconnect', null, resolve);
         });
         assert.equal(disconnected.status, 'disconnected');
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
+test('shares stable orientation decisions with paired displays and persists the selected mode', async () => {
+    const server = await startServer();
+    const clients = [];
+
+    try {
+        const firstPhone = await registerDevice(server.url, 'orientation-phone-one');
+        const secondPhone = await registerDevice(server.url, 'orientation-phone-two');
+        clients.push(firstPhone.socket, secondPhone.socket);
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialOrientation = nextEvent(controller, 'shared-orientation:current');
+        await emitAck(controller, 'controller:register');
+        assert.equal((await initialOrientation).mode, 'MANUAL');
+
+        const saved = await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            orientationMode: 'AUTO'
+        });
+        assert.equal(saved.ok, true);
+        assert.equal(saved.orientationMode, 'AUTO');
+        assert.equal(JSON.parse(await readFile(server.calibrationFile, 'utf8')).orientationMode,
+            'AUTO');
+        assert.equal((await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            orientationMode: 'DIAGONAL'
+        })).ok, false);
+
+        for (const [phone, orientation, angle] of [
+            [firstPhone.socket, 'portrait', 0],
+            [secondPhone.socket, 'landscape', 90]
+        ]) {
+            phone.emit('device:orientation', {
+                deviceId: orientation === 'portrait'
+                    ? 'orientation-phone-one'
+                    : 'orientation-phone-two',
+                orientation,
+                angle,
+                source: 'screen-orientation-api',
+                timestamp: Date.now()
+            });
+        }
+
+        const session = await emitAck(controller, 'vision:camera:create', null);
+        assert.equal(session.ok, true);
+        const camera = await connectClient(server.url);
+        clients.push(camera);
+        assert.equal((await emitAck(camera, 'vision:camera:join', {
+            token: session.token
+        })).ok, true);
+
+        const finalUpdates = Promise.all([
+            nextMatchingEvent(controller, 'shared-orientation:update',
+                (configuration) => configuration.orientation === 'landscape'
+                    && configuration.evidenceSufficient),
+            nextMatchingEvent(firstPhone.socket, 'shared-orientation:update',
+                (configuration) => configuration.orientation === 'landscape'
+                    && configuration.evidenceSufficient),
+            nextMatchingEvent(secondPhone.socket, 'shared-orientation:update',
+                (configuration) => configuration.orientation === 'landscape'
+                    && configuration.evidenceSufficient)
+        ]);
+        const reportFrame = async () => {
+            const update = nextEvent(controller, 'vision:camera:update');
+            camera.emit('vision:camera:report', {
+                frame: { width: 640, height: 480 },
+                markers: [
+                    ['orientation-phone-one', 0.3],
+                    ['orientation-phone-two', 0.7]
+                ].map(([deviceId, x]) => ({
+                    id: computeMarkerIdForDevice(deviceId),
+                    x,
+                    y: 0.5,
+                    width: 0.1,
+                    height: 0.1,
+                    rotation: 0,
+                    confidence: 0.9,
+                    visible: true,
+                    timestamp: Date.now()
+                }))
+            });
+            await update;
+        };
+        await reportFrame();
+        await new Promise((resolve) => setTimeout(resolve, 550));
+        await reportFrame();
+        const updates = await Promise.race([
+            finalUpdates,
+            new Promise((_, reject) => setTimeout(() =>
+                reject(new Error('Timed out waiting for shared orientation decision')), 4000))
+        ]);
+        assert.deepEqual(updates[0], updates[1]);
+        assert.deepEqual(updates[1], updates[2]);
+        assert.equal(updates[0].mode, 'AUTO');
+        assert.equal(updates[0].orientation, 'landscape');
+        assert.equal(updates[0].arrangement, 'SIDE_BY_SIDE');
+        assert.equal(updates[0].relativeDeviceAngle, 90);
+        assert.equal(updates[0].physicalGeometryCalibrated, false);
+        assert.deepEqual(updates[0].devices.map(({ deviceId }) => deviceId), [
+            'orientation-phone-one',
+            'orientation-phone-two'
+        ]);
+
+        controller.disconnect();
+        const restoredController = await connectClient(server.url);
+        clients.push(restoredController);
+        const restoredConfig = nextEvent(restoredController, 'screen-config:current');
+        await emitAck(restoredController, 'controller:register');
+        assert.equal((await restoredConfig).orientationMode, 'AUTO');
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
+test('rejects an orientation report before registration, then accepts it after device assignment', async () => {
+    const server = await startServer();
+    const socket = createSocket(server.url, { reconnection: false, timeout: 3000 });
+
+    try {
+        await new Promise((resolve, reject) => {
+            socket.once('connect', resolve);
+            socket.once('connect_error', reject);
+        });
+        const rejected = await emitAck(socket, 'device:orientation', {
+            deviceId: 'registration-race-phone',
+            orientation: 'landscape',
+            angle: 90,
+            source: 'screen-orientation-api',
+            timestamp: Date.now()
+        });
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.rejectionReason, 'socket-not-associated-with-registered-device');
+
+        const assignmentPromise = nextEvent(socket, 'device:assigned');
+        socket.emit('device:register', 'registration-race-phone');
+        const assignment = await assignmentPromise;
+        const accepted = await emitAck(socket, 'device:orientation', {
+            deviceId: 'registration-race-phone',
+            orientation: 'landscape',
+            angle: 90,
+            source: 'screen-orientation-api',
+            timestamp: Date.now()
+        });
+        assert.equal(accepted.ok, true);
+        assert.equal(accepted.deviceId, assignment.deviceId);
+        assert.equal(accepted.screen, assignment.screen);
+    } finally {
+        socket.disconnect();
+        await server.close();
+    }
+});
+
+test('accepts rotation reports only from the registered device socket and restores reporting after reconnect', async () => {
+    const server = await startServer();
+    const clients = [];
+
+    try {
+        const firstConnection = await registerDevice(server.url, 'rotation-report-phone');
+        clients.push(firstConnection.socket);
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialStatus = nextEvent(controller, 'shared-orientation:current');
+        await emitAck(controller, 'controller:register');
+        await initialStatus;
+
+        const makeReport = (deviceId, orientation, angle) => ({
+            deviceId,
+            orientation,
+            angle,
+            source: 'screen-orientation-api',
+            timestamp: Date.now()
+        });
+        const rotatedStatus = nextMatchingEvent(controller, 'shared-orientation:update',
+            (configuration) => configuration.devices.some((device) =>
+                device.deviceId === 'rotation-report-phone'
+                && device.orientation === 'landscape' && device.angle === 90));
+        const accepted = await emitAck(firstConnection.socket, 'device:orientation',
+            makeReport('rotation-report-phone', 'landscape', 90));
+        assert.equal(accepted.ok, true);
+        assert.equal(accepted.deviceId, 'rotation-report-phone');
+        assert.equal(accepted.screen, firstConnection.assignment.screen);
+        const rotatedConfiguration = await rotatedStatus;
+        assert.equal(rotatedConfiguration.devices.find((device) =>
+            device.deviceId === 'rotation-report-phone').orientation, 'landscape');
+
+        const spoofed = await emitAck(firstConnection.socket, 'device:orientation',
+            makeReport('different-persistent-device', 'portrait', 0));
+        assert.equal(spoofed.ok, false);
+        assert.equal(spoofed.rejectionReason, 'persistent-device-id-does-not-match-socket');
+
+        const replacement = await registerDevice(server.url, 'rotation-report-phone');
+        clients.push(replacement.socket);
+        const reconnectStatus = nextMatchingEvent(controller, 'shared-orientation:update',
+            (configuration) => configuration.devices.some((device) =>
+                device.deviceId === 'rotation-report-phone'
+                && device.orientation === 'portrait' && device.angle === 180));
+        const reconnectedReport = await emitAck(replacement.socket, 'device:orientation',
+            makeReport('rotation-report-phone', 'portrait', 180));
+        assert.equal(reconnectedReport.ok, true);
+        assert.equal(reconnectedReport.deviceId, 'rotation-report-phone');
+        const reconnectedConfiguration = await reconnectStatus;
+        assert.equal(reconnectedConfiguration.devices.find((device) =>
+            device.deviceId === 'rotation-report-phone').orientation, 'portrait');
+        assert.equal(reconnectedConfiguration.devices.find((device) =>
+            device.deviceId === 'rotation-report-phone').angle, 180);
     } finally {
         for (const socket of clients) {
             socket.disconnect();
@@ -499,6 +852,197 @@ test('authorizes calibration controllers and synchronizes current state to displ
     }
 });
 
+test('persists screen-surface corner calibrations independently from marker assignments', async () => {
+    const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-surface-calibration-test-'));
+    let server = await startServer({ testDirectory });
+    let clients = [];
+
+    try {
+        const firstPhone = await registerDevice(server.url, 'surface-phone-one');
+        const secondPhone = await registerDevice(server.url, 'surface-phone-two');
+        clients.push(firstPhone.socket, secondPhone.socket);
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialCalibrations = nextEvent(controller, 'screen-surface:calibrations:current');
+        controller.emit('controller:register');
+        assert.deepEqual(await initialCalibrations, { calibrations: {} });
+
+        const calibrations = [
+            {
+                deviceId: 'surface-phone-one',
+                corners: [
+                    { x: 0.1, y: 0.2 }, { x: 0.45, y: 0.2 },
+                    { x: 0.45, y: 0.8 }, { x: 0.1, y: 0.8 }
+                ]
+            },
+            {
+                deviceId: 'surface-phone-two',
+                corners: [
+                    { x: 0.45, y: 0.2 }, { x: 0.9, y: 0.2 },
+                    { x: 0.9, y: 0.8 }, { x: 0.45, y: 0.8 }
+                ]
+            }
+        ];
+        for (const calibration of calibrations) {
+            assert.equal((await emitAck(controller, 'screen-surface:calibration:save', {
+                ...calibration,
+                confidence: 0.8
+            })).ok, true);
+        }
+        const persisted = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        assert.equal(persisted.markerAssignments['surface-phone-one'],
+            firstPhone.assignment.markerId);
+        assert.equal(persisted.markerAssignments['surface-phone-two'],
+            secondPhone.assignment.markerId);
+        assert.equal(Object.keys(persisted.surfaceCalibrations).length, 2);
+
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        clients = [];
+        await server.close();
+        server = await startServer({ testDirectory });
+        const restartedController = await connectClient(server.url);
+        clients.push(restartedController);
+        const restoredCalibrations = nextEvent(
+            restartedController,
+            'screen-surface:calibrations:current'
+        );
+        restartedController.emit('controller:register');
+        const restored = await restoredCalibrations;
+        assert.deepEqual(Object.keys(restored.calibrations).sort(), [
+            'surface-phone-one',
+            'surface-phone-two'
+        ]);
+        assert.equal(restored.calibrations['surface-phone-one'].method,
+            'manual-four-corner-confirmation');
+        assert.equal(restored.calibrations['surface-phone-two'].physicalGeometryCalibrated, false);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+        await rm(testDirectory, { recursive: true, force: true });
+    }
+});
+
+test('broadcasts shared adaptive viewports and falls back on disconnect before restoring after reconnect', async () => {
+    const server = await startServer();
+    const clients = [];
+
+    try {
+        const firstPhone = await registerDevice(server.url, 'adaptive-phone-one');
+        const secondPhone = await registerDevice(server.url, 'adaptive-phone-two');
+        clients.push(firstPhone.socket, secondPhone.socket);
+        const controller = await connectClient(server.url);
+        clients.push(controller);
+        const initialConfiguration = nextEvent(controller, 'adaptive-rendering:current');
+        controller.emit('controller:register');
+        const initial = await initialConfiguration;
+        assert.equal(initial.active, false);
+        assert.equal(initial.reason, 'disabled-by-controller');
+
+        assert.equal((await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            adaptiveRenderingEnabled: true
+        })).adaptiveRenderingEnabled, true);
+
+        const calibrations = [
+            {
+                deviceId: 'adaptive-phone-one',
+                corners: [
+                    { x: 0.5, y: 0.2 }, { x: 0.9, y: 0.2 },
+                    { x: 0.9, y: 0.8 }, { x: 0.5, y: 0.8 }
+                ]
+            },
+            {
+                deviceId: 'adaptive-phone-two',
+                corners: [
+                    { x: 0.1, y: 0.2 }, { x: 0.5, y: 0.2 },
+                    { x: 0.5, y: 0.8 }, { x: 0.1, y: 0.8 }
+                ]
+            }
+        ];
+        let activeUpdate;
+        for (const [index, calibration] of calibrations.entries()) {
+            const firstUpdate = index === 1
+                ? nextMatchingEvent(firstPhone.socket, 'adaptive-rendering:update',
+                    (configuration) => configuration.active)
+                : null;
+            const secondUpdate = index === 1
+                ? nextMatchingEvent(secondPhone.socket, 'adaptive-rendering:update',
+                    (configuration) => configuration.active)
+                : null;
+            const saved = await emitAck(controller, 'screen-surface:calibration:save', {
+                ...calibration,
+                confidence: 0.9
+            });
+            assert.equal(saved.ok, true);
+            if (index === 1) {
+                assert.equal(saved.viewports.valid, true);
+                activeUpdate = await Promise.all([firstUpdate, secondUpdate]);
+            }
+        }
+
+        const active = activeUpdate[0];
+        assert.equal(active.active, true);
+        assert.equal(active.arrangement, 'SIDE_BY_SIDE');
+        assert.equal(active.physicalGeometryCalibrated, false);
+        assert.ok(active.version > initial.version);
+        assert.deepEqual(active.devices.map(({ deviceId, screen }) => ({
+            deviceId,
+            screen
+        })), [
+            { deviceId: 'adaptive-phone-one', screen: 1 },
+            { deviceId: 'adaptive-phone-two', screen: 2 }
+        ]);
+        assert.deepEqual(activeUpdate[0], activeUpdate[1]);
+        const unchangedConfigurationUpdate = nextMatchingEvent(
+            controller,
+            'adaptive-rendering:update',
+            (configuration) => configuration.active
+        );
+        await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            adaptiveRenderingEnabled: true
+        });
+        assert.equal((await unchangedConfigurationUpdate).version, active.version);
+
+        const fallbackUpdate = nextMatchingEvent(
+            firstPhone.socket,
+            'adaptive-rendering:update',
+            (configuration) => !configuration.active
+                && configuration.reason === 'both-display-devices-must-be-connected'
+        );
+        secondPhone.socket.disconnect();
+        const fallback = await fallbackUpdate;
+        assert.ok(fallback.version > active.version);
+
+        const reconnected = await connectClient(server.url);
+        clients.push(reconnected);
+        const restoredUpdate = nextMatchingEvent(
+            reconnected,
+            'adaptive-rendering:update',
+            (configuration) => configuration.active
+        );
+        const assigned = nextEvent(reconnected, 'device:assigned');
+        reconnected.emit('device:register', 'adaptive-phone-two');
+        assert.equal((await assigned).screen, 2);
+        const restored = await restoredUpdate;
+        assert.equal(restored.active, true);
+        assert.equal(restored.devices.find(({ screen }) => screen === 2).deviceId,
+            'adaptive-phone-two');
+        assert.ok(restored.version > fallback.version);
+    } finally {
+        for (const socket of clients) {
+            socket.disconnect();
+        }
+        await server.close();
+    }
+});
+
 test('creates default settings and restores calibration and independent alignment settings after restart', async () => {
     const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-persistence-test-'));
     const defaultSettings = storedSettings();
@@ -604,7 +1148,7 @@ test('configures four screens, persists assignments and presets, and restores th
             assignmentMode: 'automatic'
         });
 
-        test('persists shared screen fill settings and broadcasts one configuration to all displays', async () => {
+        await test('persists shared screen fill settings and broadcasts one configuration to all displays', async () => {
             const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-screen-fill-test-'));
             let server = await startServer({ testDirectory });
             const clients = [];
@@ -645,6 +1189,22 @@ test('configures four screens, persists assignments and presets, and restores th
                     assert.equal((await refreshedConfig).fitMode, fitMode);
                 }
 
+                const adaptiveSettingUpdate = nextEvent(controller, 'screen-config:update');
+                const adaptivePhoneUpdate = nextEvent(phone.socket, 'adaptive-rendering:update');
+                const adaptiveSaved = await emitAck(controller, 'display-settings:set', {
+                    screenFillEnabled: true,
+                    fitMode: 'cover',
+                    adaptiveRenderingEnabled: true
+                });
+                assert.equal(adaptiveSaved.adaptiveRenderingEnabled, true);
+                assert.equal((await adaptiveSettingUpdate).adaptiveRenderingEnabled, true);
+                assert.equal((await adaptivePhoneUpdate).enabled, true);
+                assert.equal(
+                    JSON.parse(await readFile(server.calibrationFile, 'utf8'))
+                        .adaptiveRenderingEnabled,
+                    true
+                );
+
                 const unauthorized = await connectClient(server.url);
                 clients.push(unauthorized);
                 assert.equal((await emitAck(unauthorized, 'display-settings:set', {
@@ -670,11 +1230,13 @@ test('configures four screens, persists assignments and presets, and restores th
                 const restored = await currentConfig;
                 assert.equal(restored.screenFillEnabled, true);
                 assert.equal(restored.fitMode, 'cover');
+                assert.equal(restored.adaptiveRenderingEnabled, true);
 
                 const restoredPhone = await registerDevice(server.url, 'screen-fill-phone');
                 clients.push(restoredPhone.socket);
                 assert.equal(restoredPhone.assignment.screenFillEnabled, true);
                 assert.equal(restoredPhone.assignment.fitMode, 'cover');
+                assert.equal(restoredPhone.assignment.adaptiveRenderingEnabled, true);
                 const restoredSecondPhone = await registerDevice(server.url, 'screen-fill-phone-two');
                 clients.push(restoredSecondPhone.socket);
                 assert.equal(restoredSecondPhone.assignment.fitMode, 'cover');
