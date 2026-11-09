@@ -1,7 +1,7 @@
 {
   "calibrationEnabled": false,
   "totalScreens": 2,
-  "assignmentMode": "manual",
+  "assignmentMode": "automatic",
   "assignments": {
     "60f643f1-3382-40bb-8bda-52ba5f0bbc07": null,
     "3f2e0ddb-c883-4527-96d3-20d3a88c59f1": null,
@@ -123,7 +123,7 @@
     }
   },
   "layout": {
-    "type": "horizontal",
+    "type": "custom",
     "rows": 1,
     "columns": 2,
     "screens": {
@@ -131,14 +131,14 @@
         "row": 0,
         "column": 0,
         "rotation": 0,
-        "orientation": "auto",
+        "orientation": "landscape",
         "enabled": true
       },
       "2": {
         "row": 0,
         "column": 1,
         "rotation": 0,
-        "orientation": "auto",
+        "orientation": "landscape",
         "enabled": true
       }
     }

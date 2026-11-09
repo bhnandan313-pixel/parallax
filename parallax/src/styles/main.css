@@ -95,6 +95,7 @@ body,
     object-fit: contain;
     max-width: none;
     background: #000;
+    touch-action: none;
 }
 
 .status-panel {

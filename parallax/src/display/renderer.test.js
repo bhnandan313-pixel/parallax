@@ -71,6 +71,7 @@ class FakeCanvas {
     attributes = {};
     calls = [];
     animations = [];
+    listeners = new Map();
 
     get width() {
         return this._width;
@@ -92,6 +93,23 @@ class FakeCanvas {
 
     setAttribute(name, value) {
         this.attributes[name] = value;
+    }
+
+    addEventListener(name, callback) {
+        const listeners = this.listeners.get(name) ?? new Set();
+        listeners.add(callback);
+        this.listeners.set(name, listeners);
+    }
+
+    removeEventListener(name, callback) {
+        this.listeners.get(name)?.delete(callback);
+    }
+
+    dispatchPointer(name, pointerId, clientX, clientY) {
+        const event = { pointerId, clientX, clientY, preventDefault() {} };
+        for (const listener of this.listeners.get(name) ?? []) {
+            listener(event);
+        }
     }
 
     animate(keyframes, options) {
@@ -171,6 +189,7 @@ function setupRenderer(
         requestFrame: () => 1,
         cancelFrame: () => {},
         now: options.now ?? (() => 1000),
+        onAlignmentChange: options.onAlignmentChange,
         scheduleTimeout: options.scheduleTimeout,
         cancelTimeout: options.cancelTimeout
     });
@@ -179,6 +198,15 @@ function setupRenderer(
 
 function drawCalls(canvas) {
     return canvas.calls.filter(([name]) => name === 'drawImage');
+}
+
+function transformsForLastDraw(canvas) {
+    const drawIndexes = canvas.calls.flatMap(([name], index) =>
+        name === 'drawImage' ? [index] : []);
+    const start = drawIndexes.at(-2) ?? -1;
+    const end = drawIndexes.at(-1) ?? canvas.calls.length;
+    return canvas.calls.slice(start + 1, end)
+        .filter(([name]) => ['translate', 'rotate', 'scale'].includes(name));
 }
 
 test('coordinates fade and slide transitions against the server timeline', () => {
@@ -227,9 +255,176 @@ test('coordinates fade and slide transitions against the server timeline', () =>
     }
 });
 
+test('uses one wall-wide cover transform for both screens without reloading media', () => {
+    const renderers = [1, 2].map((screen) => setupRenderer(screen, {
+        width: 1920,
+        height: 1080,
+        orientation: 'landscape'
+    }));
+    for (const { canvas, images, render } of renderers) {
+        render({ contentType: 'image', imageUrl: '/wall.jpg', updateId: 'wall' });
+        images[0].naturalWidth = 3840;
+        images[0].naturalHeight = 1080;
+        images[0].load();
+        const draw = drawCalls(canvas)[0];
+        assert.deepEqual(draw.slice(2), [0, 0]);
+    }
+
+    const [left, right] = renderers;
+    const leftTransforms = left.canvas.calls.filter(([name]) =>
+        name === 'translate' || name === 'scale');
+    const rightTransforms = right.canvas.calls.filter(([name]) =>
+        name === 'translate' || name === 'scale');
+    assert.deepEqual(leftTransforms, [
+        ['translate', 0, 0],
+        ['scale', 1, 1]
+    ]);
+    assert.deepEqual(rightTransforms, [
+        ['translate', -1920, 0],
+        ['scale', 1, 1]
+    ]);
+});
+
+test('fit mode changes redraw the existing source and manual mode retains per-screen calibration', () => {
+    const { canvas, images, render } = setupRenderer(2, {
+        width: 600,
+        height: 400,
+        orientation: 'landscape'
+    });
+    render({ contentType: 'image', imageUrl: '/wall.jpg', updateId: 'wall' });
+    images[0].load();
+    assert.equal(render.setAlignment({ horizontal: 35, vertical: -20, scale: 1.8 }), true);
+    assert.deepEqual(transformsForLastDraw(canvas).filter(([name]) => name === 'scale'), [
+        ['scale', 1, 1]
+    ]);
+
+    assert.equal(render.setScreenFill({ enabled: true, fitMode: 'contain' }), true);
+    assert.deepEqual(drawCalls(canvas).at(-1).slice(2), [0, 0]);
+    assert.deepEqual(transformsForLastDraw(canvas).filter(([name]) => name === 'scale'), [
+        ['scale', 2 / 3, 2 / 3]
+    ]);
+    assert.deepEqual(transformsForLastDraw(canvas).filter(([name]) => name === 'translate'), [
+        ['translate', -400, 0]
+    ]);
+    assert.equal(images.length, 1);
+
+    assert.equal(render.setScreenFill({ enabled: true, fitMode: 'stretch' }), true);
+    assert.deepEqual(drawCalls(canvas).at(-1).slice(2), [0, 0]);
+    assert.deepEqual(transformsForLastDraw(canvas).filter(([name]) => name === 'scale'), [
+        ['scale', 1, 2 / 3]
+    ]);
+    assert.deepEqual(transformsForLastDraw(canvas).filter(([name]) => name === 'translate'), [
+        ['translate', -600, 0]
+    ]);
+    assert.equal(render.setScreenFill({ enabled: true, fitMode: 'manual' }), true);
+    assert.deepEqual(drawCalls(canvas).at(-1).slice(2, 6), [600, 0, 600, 600]);
+    assert.ok(transformsForLastDraw(canvas).some(([name, x, y]) =>
+        name === 'translate' && x === 335 && y === 180));
+    assert.ok(transformsForLastDraw(canvas).some(([name, x, y]) =>
+        name === 'scale' && x === 1.8 && y === 1.8));
+    for (const fitMode of ['cover', 'contain', 'stretch']) {
+        assert.equal(render.setScreenFill({ enabled: true, fitMode }), true);
+        assert.deepEqual(
+            transformsForLastDraw(canvas).filter(([name]) => name === 'scale'),
+            fitMode === 'cover'
+                ? [['scale', 1, 1]]
+                : fitMode === 'contain'
+                    ? [['scale', 2 / 3, 2 / 3]]
+                    : [['scale', 1, 2 / 3]]
+        );
+        assert.deepEqual(
+            transformsForLastDraw(canvas).filter(([name]) => name === 'translate'),
+            fitMode === 'cover'
+                ? [['translate', -600, -100]]
+                : fitMode === 'contain'
+                    ? [['translate', -400, 0]]
+                    : [['translate', -600, 0]]
+        );
+    }
+    assert.equal(render.setScreenFill({ enabled: false, fitMode: 'stretch' }), true);
+    assert.ok(transformsForLastDraw(canvas).some(([name, x, y]) =>
+        name === 'scale' && x === 1.8 && y === 1.8));
+    assert.equal(render.setScreenFill({ enabled: true, fitMode: 'unknown' }), false);
+    assert.equal(images.length, 1);
+});
+
+test('manual pinch and drag gestures update and persist calibration only in manual mode', () => {
+    const saved = [];
+    const { canvas, images, render } = setupRenderer(2, undefined, {
+        onAlignmentChange: (alignment) => saved.push(alignment)
+    });
+    render({ contentType: 'image', imageUrl: '/manual.jpg', updateId: 'manual' });
+    images[0].load();
+
+    canvas.dispatchPointer('pointerdown', 1, 100, 100);
+    canvas.dispatchPointer('pointerdown', 2, 200, 100);
+    canvas.dispatchPointer('pointermove', 2, 300, 100);
+    canvas.dispatchPointer('pointerup', 1, 100, 100);
+    canvas.dispatchPointer('pointerup', 2, 300, 100);
+    assert.equal(saved.length, 0);
+
+    render.setScreenFill({ enabled: true, fitMode: 'manual' });
+    canvas.dispatchPointer('pointerdown', 1, 100, 100);
+    canvas.dispatchPointer('pointerdown', 2, 200, 100);
+    canvas.dispatchPointer('pointermove', 2, 300, 100);
+    canvas.dispatchPointer('pointerup', 1, 100, 100);
+    canvas.dispatchPointer('pointerup', 2, 300, 100);
+    assert.deepEqual(saved.at(-1), { horizontal: 50, vertical: 0, scale: 2 });
+
+    canvas.dispatchPointer('pointerdown', 3, 100, 100);
+    canvas.dispatchPointer('pointermove', 3, 120, 130);
+    canvas.dispatchPointer('pointerup', 3, 120, 130);
+    assert.deepEqual(saved.at(-1), { horizontal: 70, vertical: 30, scale: 2 });
+
+    const drawsBeforeAutomatic = drawCalls(canvas).length;
+    render.setScreenFill({ enabled: true, fitMode: 'cover' });
+    assert.equal(drawCalls(canvas).length, drawsBeforeAutomatic + 1);
+    canvas.dispatchPointer('pointerdown', 4, 100, 100);
+    canvas.dispatchPointer('pointermove', 4, 120, 130);
+    canvas.dispatchPointer('pointerup', 4, 120, 130);
+    assert.equal(saved.length, 2);
+
+    render.setScreenFill({ enabled: true, fitMode: 'manual' });
+    assert.ok(transformsForLastDraw(canvas).some(([name, x, y]) =>
+        name === 'scale' && x === 2 && y === 2));
+    render.dispose();
+    assert.equal(canvas.listeners.get('pointerdown').size, 0);
+});
+
+test('changing wall fit redraws video frames without restarting synchronized playback', () => {
+    const { canvas, videos, render } = setupRenderer(2);
+    render({
+        contentType: 'video',
+        videoUrl: '/wall.mp4',
+        mediaId: 'wall-video',
+        updateId: 'wall-video-update'
+    });
+    const video = videos[0];
+    render.setPlayback({
+        status: 'playing',
+        mediaId: 'wall-video',
+        positionSeconds: 2,
+        startedAt: 1000,
+        serverNow: 1000,
+        timelineId: 'wall-video-timeline'
+    });
+    const playCalls = video.playCalls;
+    const pauseCalls = video.pauseCalls;
+
+    for (const fitMode of ['contain', 'stretch', 'manual', 'cover']) {
+        assert.equal(render.setScreenFill({ enabled: true, fitMode }), true);
+        assert.equal(videos.length, 1);
+        assert.equal(video.currentTime, 2);
+        assert.equal(video.playCalls, playCalls);
+        assert.equal(video.pauseCalls, pauseCalls);
+    }
+    assert.ok(drawCalls(canvas).length >= 5);
+});
+
 test('crops adjacent horizontal screens from the shared panorama without distortion', () => {
     for (const screen of [1, 2]) {
         const { canvas, container, images, render } = setupRenderer(screen);
+        render.setScreenFill({ enabled: false, fitMode: 'manual' });
         render({ contentType: 'image', imageUrl: '/first.jpg', updateId: 'first' });
         assert.equal(container.querySelector('#panorama'), null);
         images[0].load();
@@ -248,12 +443,14 @@ test('crops adjacent horizontal screens from the shared panorama without distort
 
 test('renders four-screen horizontal, vertical, and grid source regions', () => {
     const horizontal = setupRenderer(4);
+    horizontal.render.setScreenFill({ enabled: false, fitMode: 'manual' });
     horizontal.render.setScreenCount(4);
     horizontal.render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'horizontal' });
     horizontal.images[0].load();
     assert.deepEqual(drawCalls(horizontal.canvas)[0].slice(2, 6), [900, 0, 300, 600]);
 
     const vertical = setupRenderer(3);
+    vertical.render.setScreenFill({ enabled: false, fitMode: 'manual' });
     vertical.render.setScreenCount(4);
     vertical.render.setLayout(createDefaultLayout(4, 'vertical'));
     vertical.render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'vertical' });
@@ -261,6 +458,7 @@ test('renders four-screen horizontal, vertical, and grid source regions', () => 
     assert.deepEqual(drawCalls(vertical.canvas)[0].slice(2, 6), [0, 300, 1200, 150]);
 
     const grid = setupRenderer(4);
+    grid.render.setScreenFill({ enabled: false, fitMode: 'manual' });
     grid.render.setScreenCount(4);
     grid.render.setLayout(createDefaultLayout(4, 'grid', 2, 2));
     grid.render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'grid' });
@@ -270,6 +468,7 @@ test('renders four-screen horizontal, vertical, and grid source regions', () => 
 
 test('custom gaps, rotation, and portrait/landscape overrides affect source and canvas geometry', () => {
     const custom = setupRenderer(2, { width: 800, height: 400, orientation: 'landscape' });
+    custom.render.setScreenFill({ enabled: false, fitMode: 'manual' });
     custom.render.setScreenCount(2);
     custom.render.setLayout({
         type: 'custom',
@@ -329,6 +528,7 @@ test('keeps the previous frame on image failure and ignores stale loads', () => 
 
 test('alignment redraws the canvas and disabled screens restore without losing assignments', () => {
     const { canvas, images, render, statuses } = setupRenderer(1);
+    render.setScreenFill({ enabled: true, fitMode: 'manual' });
     render({ contentType: 'image', imageUrl: '/panorama.jpg', updateId: 'first' });
     images[0].load();
     const initialDimensionWrites = canvas.dimensionWrites;
@@ -338,7 +538,7 @@ test('alignment redraws the canvas and disabled screens restore without losing a
     assert.equal(canvas.dimensionWrites, initialDimensionWrites);
     assert.ok(canvas.calls.some(([name, x, y]) =>
         name === 'translate' && x === 318 && y === 288));
-    assert.equal(render.setAlignment({ horizontal: 51, vertical: 0, scale: 1 }), false);
+    assert.equal(render.setAlignment({ horizontal: 2001, vertical: 0, scale: 1 }), false);
 
     render.setScreenEnabled(false);
     assert.equal(canvas.hidden, true);
@@ -388,6 +588,7 @@ test('preloads only video metadata and reuses the warmed video when activated', 
 test('renders a video panorama crop and synchronizes its scheduled playback timeline', () => {
     let clock = 1000;
     const { canvas, videos, render } = setupRenderer(2, undefined, { now: () => clock });
+    render.setScreenFill({ enabled: false, fitMode: 'manual' });
     render.setScreenCount(4);
     render.setLayout(createDefaultLayout(4));
     const content = {

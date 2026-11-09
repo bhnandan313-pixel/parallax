@@ -1,7 +1,13 @@
 import { createParallaxSocket, getParallaxServerBaseUrl } from '../core/socket.js';
 import { formatAlignmentValue, getAlignmentStep } from './alignment-controls.js';
 import { confirmLayoutReset } from './layout-reset.js';
-import { createDefaultLayout, validateDisplayLayout } from '../display/geometry.js';
+import {
+    ALIGNMENT_LIMITS,
+    FIT_MODES,
+    createDefaultLayout,
+    isValidAlignmentSettings,
+    validateDisplayLayout
+} from '../display/geometry.js';
 import { expectedPlaybackPosition } from '../media/playback.js';
 import { synchronizePreviewVideo } from '../media/preview-sync.js';
 import { createAudioSettings, DEFAULT_AUDIO_SETTINGS } from '../media/audio.js';
@@ -133,6 +139,47 @@ export function mountController() {
                             <button class="alignment-action" type="button" data-screen-config-save disabled>
                                 Apply configuration
                             </button>
+                        </div>
+                        <div class="display-settings-controls" aria-labelledby="display-settings-title">
+                            <div class="display-settings-heading">
+                                <h3 id="display-settings-title">Display settings</h3>
+                                <span>Shared wall</span>
+                            </div>
+                            <label class="display-setting-toggle">
+                                <input type="checkbox" data-screen-fill-toggle checked>
+                                <span>Screen Fill</span>
+                            </label>
+                            <label>Fit mode
+                                <select data-fit-mode>
+                                    <option value="cover">Cover · fill wall</option>
+                                    <option value="contain">Contain · show all</option>
+                                    <option value="stretch">Stretch · distort</option>
+                                    <option value="manual">Manual · calibration</option>
+                                </select>
+                            </label>
+                            <p class="display-settings-note">
+                                Fit is calculated once for the combined wall. Manual calibration remains available.
+                            </p>
+                            <label class="display-setting-toggle is-unavailable" title="Vision tracking does not provide reliable display orientation.">
+                                <input type="checkbox" data-automatic-rotation disabled>
+                                <span>Automatic Rotation</span>
+                            </label>
+                            <p class="display-settings-note" data-wall-orientation>
+                                Wall orientation unavailable from current tracking data.
+                            </p>
+                            <div class="display-orientation-actions">
+                                <button class="alignment-action" type="button" data-manual-override>
+                                    Manual override
+                                </button>
+                                <button class="alignment-action" type="button" data-reset-to-automatic
+                                    title="Unavailable until a reliable shared wall-orientation signal is available." disabled>
+                                    Reset to Automatic
+                                </button>
+                            </div>
+                            <p class="display-settings-note">
+                                Vision marker angle is camera-relative 2D data, not a reliable device orientation signal.
+                                Manual per-screen overrides remain available.
+                            </p>
                         </div>
                         <details class="management-disclosure">
                             <summary>Device management</summary>
@@ -595,6 +642,11 @@ export function mountController() {
     const screenCountSelect = root.querySelector('[data-screen-count]');
     const assignmentModeSelect = root.querySelector('[data-assignment-mode]');
     const screenConfigSaveButton = root.querySelector('[data-screen-config-save]');
+    const screenFillToggle = root.querySelector('[data-screen-fill-toggle]');
+    const fitModeSelect = root.querySelector('[data-fit-mode]');
+    const wallOrientationStatus = root.querySelector('[data-wall-orientation]');
+    const manualOverrideButton = root.querySelector('[data-manual-override]');
+    const resetToAutomaticButton = root.querySelector('[data-reset-to-automatic]');
     const visionConnectButton = root.querySelector('[data-vision-connect]');
     const visionStatusNode = root.querySelector('[data-vision-status]');
     const visionObservations = root.querySelector('[data-vision-observations]');
@@ -651,6 +703,8 @@ export function mountController() {
     let calibrationEnabled = false;
     let totalScreens = 2;
     let assignmentMode = 'automatic';
+    let displaySettings = { screenFillEnabled: true, fitMode: 'cover' };
+    let pendingDisplaySettings = null;
     let registeredDevices = [];
     let visionObservationCache = [];
     let panoramaImageUrl = null;
@@ -1011,9 +1065,12 @@ export function mountController() {
                     </button>
                 </div>
                 ${[
-                    ['horizontal', 'Horizontal', '-50', '50'],
-                    ['vertical', 'Vertical', '-50', '50'],
-                    ['scale', 'Scale', '0.95', '1.05']
+                    ['horizontal', 'Horizontal', String(-ALIGNMENT_LIMITS.horizontal),
+                        String(ALIGNMENT_LIMITS.horizontal)],
+                    ['vertical', 'Vertical', String(-ALIGNMENT_LIMITS.vertical),
+                        String(ALIGNMENT_LIMITS.vertical)],
+                    ['scale', 'Scale', String(ALIGNMENT_LIMITS.scaleMinimum),
+                        String(ALIGNMENT_LIMITS.scaleMaximum)]
                 ].map(([axis, label, min, max]) => `
                     <label class="alignment-control">
                         <span>${label} <output data-alignment-value="${axis}">0</output></span>
@@ -1386,6 +1443,52 @@ export function mountController() {
         sendAlignment(screen);
     });
 
+    function renderDisplaySettingsControls() {
+        screenFillToggle.checked = displaySettings.screenFillEnabled;
+        fitModeSelect.value = displaySettings.fitMode;
+        screenFillToggle.disabled = !socket.connected || pendingDisplaySettings !== null;
+        fitModeSelect.disabled = !socket.connected || pendingDisplaySettings !== null
+            || !displaySettings.screenFillEnabled;
+        resetToAutomaticButton.disabled = true;
+        resetToAutomaticButton.title =
+            'Unavailable until a reliable shared wall-orientation signal is available.';
+        manualOverrideButton.disabled = !socket.connected;
+        const layoutOrientation = displayLayout.columns >= displayLayout.rows
+            ? 'landscape layout'
+            : 'portrait layout';
+        wallOrientationStatus.textContent =
+            `Wall orientation: not detected · ${layoutOrientation} (${displayLayout.rows} × ${displayLayout.columns})`;
+    }
+
+    function saveDisplaySettings(nextSettings) {
+        if (!socket.connected || pendingDisplaySettings !== null) {
+            return;
+        }
+        const previous = displaySettings;
+        const requested = { ...displaySettings, ...nextSettings };
+        pendingDisplaySettings = requested;
+        displaySettings = requested;
+        renderDisplaySettingsControls();
+        socket.timeout(5000).emit('display-settings:set', requested, (error, response) => {
+            if (pendingDisplaySettings !== requested) {
+                return;
+            }
+            pendingDisplaySettings = null;
+            if (error || !response?.ok) {
+                displaySettings = previous;
+                renderDisplaySettingsControls();
+                layoutStatus.textContent = error
+                    ? 'The server did not acknowledge the display settings.'
+                    : response?.message || 'Unable to update display settings.';
+                layoutStatus.classList.add('is-error');
+                return;
+            }
+            applyScreenConfiguration(response);
+            layoutStatus.textContent = 'Shared display settings saved.';
+            layoutStatus.classList.remove('is-error');
+        });
+    }
+
     function applyScreenConfiguration(configuration) {
         if (!Number.isInteger(configuration?.totalScreens)
             || configuration.totalScreens < 2 || configuration.totalScreens > 12
@@ -1394,6 +1497,15 @@ export function mountController() {
         }
         totalScreens = configuration.totalScreens;
         assignmentMode = configuration.assignmentMode;
+        if (pendingDisplaySettings === null) {
+            displaySettings = {
+                screenFillEnabled: configuration.screenFillEnabled !== false,
+                fitMode: FIT_MODES.includes(configuration.fitMode)
+                    ? configuration.fitMode
+                    : 'cover'
+            };
+        }
+        renderDisplaySettingsControls();
         const nextLayout = configuration.layout ?? createDefaultLayout(totalScreens);
         if (!setDisplayLayout(nextLayout, { render: false })) {
             layoutWarning.hidden = false;
@@ -1403,16 +1515,14 @@ export function mountController() {
         if (configuration.screens && typeof configuration.screens === 'object') {
             for (const screen of Object.keys(alignmentByScreen)) {
                 const settings = configuration.screens[screen];
-                if (settings
-                    && Number.isFinite(settings.horizontal)
-                    && Number.isFinite(settings.vertical)
-                    && Number.isFinite(settings.scale)) {
+                if (isValidAlignmentSettings(settings)) {
                     alignmentByScreen[screen] = { ...settings };
                 }
             }
         }
         renderScreenPanels();
         renderPanoramaPreview();
+        renderDisplaySettingsControls();
         layoutStatus.textContent = `Layout synchronized (${displayLayout.type}, ${displayLayout.rows} × ${displayLayout.columns}).`;
         layoutStatus.classList.remove('is-error');
         setLayoutPresets(layoutPresets);
@@ -1445,6 +1555,29 @@ export function mountController() {
             applyScreenConfiguration(response);
         });
     });
+
+    screenFillToggle.addEventListener('change', () => {
+        saveDisplaySettings({ screenFillEnabled: screenFillToggle.checked });
+    });
+    fitModeSelect.addEventListener('change', () => {
+        saveDisplaySettings({ fitMode: fitModeSelect.value });
+    });
+    manualOverrideButton.addEventListener('click', () => {
+        const screenSettings = [...dashboardWall.querySelectorAll('.screen-options')];
+        screenSettings.forEach((details) => {
+            details.open = true;
+        });
+        const screenCard = dashboardWall.querySelector('[data-dashboard-screen="1"]');
+        const orientationSelect = screenCard?.querySelector('[data-screen-orientation="1"]');
+        if (!orientationSelect) {
+            layoutStatus.textContent = 'Manual orientation controls are unavailable until a screen is configured.';
+            layoutStatus.classList.add('is-error');
+            return;
+        }
+        orientationSelect.focus();
+        screenCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    renderDisplaySettingsControls();
 
     layoutTypeSelect.addEventListener('change', () => {
         const type = layoutTypeSelect.value;
@@ -3283,6 +3416,7 @@ export function mountController() {
         screenConfigSaveButton.disabled = false;
         assignmentModeSelect.disabled = false;
         screenCountSelect.disabled = false;
+        renderDisplaySettingsControls();
         addDeviceButton.disabled = false;
         visionConnectButton.disabled = false;
         playbackVolume.disabled = false;
@@ -3319,6 +3453,7 @@ export function mountController() {
         screenConfigSaveButton.disabled = true;
         assignmentModeSelect.disabled = true;
         screenCountSelect.disabled = true;
+        renderDisplaySettingsControls();
         addDeviceButton.disabled = true;
         visionConnectButton.disabled = true;
         playbackVolume.disabled = true;
@@ -3423,18 +3558,8 @@ export function mountController() {
 
         for (const [screenKey, settings] of Object.entries(screens)) {
             const screen = Number(screenKey);
-            if (!settings
-                || !Number.isInteger(screen)
-                || screen < 1 || screen > 12
-                || !Number.isFinite(settings.horizontal)
-                || settings.horizontal < -50
-                || settings.horizontal > 50
-                || !Number.isFinite(settings.vertical)
-                || settings.vertical < -50
-                || settings.vertical > 50
-                || !Number.isFinite(settings.scale)
-                || settings.scale < 0.95
-                || settings.scale > 1.05) {
+            if (!Number.isInteger(screen) || screen < 1 || screen > 12
+                || !isValidAlignmentSettings(settings)) {
                 return;
             }
 

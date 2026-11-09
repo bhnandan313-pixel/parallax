@@ -19,7 +19,8 @@ function defaultScreens(count = 12) {
 function storedSettings({ calibrationEnabled = false, screens = {}, assignments = {},
     markerAssignments = {},
     totalScreens = 2, assignmentMode = 'automatic', presets = [],
-    layout = defaultLayout(totalScreens), layoutPresets = [] } = {}) {
+    layout = defaultLayout(totalScreens), layoutPresets = [],
+    screenFillEnabled = true, fitMode = 'cover' } = {}) {
     return {
         calibrationEnabled,
         totalScreens,
@@ -29,6 +30,8 @@ function storedSettings({ calibrationEnabled = false, screens = {}, assignments 
         screens: { ...defaultScreens(), ...screens },
         presets,
         layout,
+        screenFillEnabled,
+        fitMode,
         layoutPresets
     };
 }
@@ -335,10 +338,10 @@ test('authorizes and synchronizes independent screen alignment settings', async 
             { ...screenOneSettings, horizontal: Number.NaN },
             { ...screenOneSettings, vertical: null },
             { ...screenOneSettings, vertical: Number.POSITIVE_INFINITY },
-            { ...screenOneSettings, scale: 1.06 },
-            { ...screenOneSettings, horizontal: -51 },
-            { ...screenOneSettings, vertical: 51 },
-            { ...screenOneSettings, scale: 0.94 }
+            { ...screenOneSettings, scale: 4.1 },
+            { ...screenOneSettings, horizontal: -2001 },
+            { ...screenOneSettings, vertical: 2001 },
+            { ...screenOneSettings, scale: 0.24 }
         ];
         for (const settings of invalidSettings) {
             const result = await new Promise((resolve) => {
@@ -379,6 +382,33 @@ test('authorizes and synchronizes independent screen alignment settings', async 
         clients.push(replacement.socket);
         assert.equal(replacement.assignment.screen, 1);
         assert.deepEqual((await replacement.initialAlignment).screens, bothScreens.screens);
+
+        const deviceSettings = { horizontal: 120, vertical: -80, scale: 2.25 };
+        const replacementUpdate = nextEvent(replacement.socket, 'alignment:update');
+        const secondDeviceUpdate = nextEvent(second.socket, 'alignment:update');
+        const controllerUpdate = nextEvent(controller, 'alignment:current');
+        assert.deepEqual(await emitAck(replacement.socket, 'device:alignment:set', {
+            settings: deviceSettings
+        }), {
+            ok: true,
+            screen: 1,
+            settings: deviceSettings
+        });
+        const updatedScreens = {
+            ...bothScreens.screens,
+            1: deviceSettings
+        };
+        assert.deepEqual((await replacementUpdate).screens, updatedScreens);
+        assert.deepEqual((await secondDeviceUpdate).screens, updatedScreens);
+        assert.deepEqual((await controllerUpdate).screens, updatedScreens);
+        const persistedSettings = JSON.parse(await readFile(server.calibrationFile, 'utf8'));
+        assert.deepEqual(persistedSettings.screens[1], deviceSettings);
+        assert.deepEqual(await emitAck(controller, 'device:alignment:set', {
+            settings: { horizontal: 0, vertical: 0, scale: 1 }
+        }), {
+            ok: false,
+            message: 'Only an assigned display can update its own calibration.'
+        });
     } finally {
         for (const socket of clients) {
             socket.disconnect();
@@ -572,6 +602,89 @@ test('configures four screens, persists assignments and presets, and restores th
         const configResult = await emitAck(controller, 'screen-config:set', {
             totalScreens: 12,
             assignmentMode: 'automatic'
+        });
+
+        test('persists shared screen fill settings and broadcasts one configuration to all displays', async () => {
+            const testDirectory = await mkdtemp(join(tmpdir(), 'parallax-screen-fill-test-'));
+            let server = await startServer({ testDirectory });
+            const clients = [];
+
+            try {
+                let controller = await connectClient(server.url);
+                clients.push(controller);
+                const initialControllerConfig = nextEvent(controller, 'screen-config:current');
+                await emitAck(controller, 'controller:register');
+                assert.equal((await initialControllerConfig).fitMode, 'cover');
+                const phone = await registerDevice(server.url, 'screen-fill-phone');
+                clients.push(phone.socket);
+                const secondPhone = await registerDevice(server.url, 'screen-fill-phone-two');
+                clients.push(secondPhone.socket);
+
+                for (const fitMode of ['contain', 'stretch', 'manual', 'cover']) {
+                    const controllerUpdate = nextEvent(controller, 'screen-config:update');
+                    const firstPhoneUpdate = nextEvent(phone.socket, 'layout:update');
+                    const secondPhoneUpdate = nextEvent(secondPhone.socket, 'layout:update');
+                    const saved = await emitAck(controller, 'display-settings:set', {
+                        screenFillEnabled: true,
+                        fitMode
+                    });
+                    assert.equal(saved.ok, true);
+                    assert.equal(saved.screenFillEnabled, true);
+                    assert.equal(saved.fitMode, fitMode);
+                    assert.equal((await controllerUpdate).fitMode, fitMode);
+                    assert.equal((await firstPhoneUpdate).fitMode, fitMode);
+                    assert.equal((await secondPhoneUpdate).fitMode, fitMode);
+                    assert.equal(JSON.parse(await readFile(server.calibrationFile, 'utf8')).fitMode, fitMode);
+
+                    controller.disconnect();
+                    clients.splice(clients.indexOf(controller), 1);
+                    controller = await connectClient(server.url);
+                    clients.push(controller);
+                    const refreshedConfig = nextEvent(controller, 'screen-config:current');
+                    await emitAck(controller, 'controller:register');
+                    assert.equal((await refreshedConfig).fitMode, fitMode);
+                }
+
+                const unauthorized = await connectClient(server.url);
+                clients.push(unauthorized);
+                assert.equal((await emitAck(unauthorized, 'display-settings:set', {
+                    screenFillEnabled: false,
+                    fitMode: 'stretch'
+                })).ok, false);
+                assert.equal((await emitAck(controller, 'display-settings:set', {
+                    screenFillEnabled: true,
+                    fitMode: 'unsupported'
+                })).ok, false);
+
+                for (const socket of clients) {
+                    socket.disconnect();
+                }
+                clients.length = 0;
+                await server.close();
+                server = await startServer({ testDirectory });
+
+                const restoredController = await connectClient(server.url);
+                clients.push(restoredController);
+                const currentConfig = nextEvent(restoredController, 'screen-config:current');
+                restoredController.emit('controller:register');
+                const restored = await currentConfig;
+                assert.equal(restored.screenFillEnabled, true);
+                assert.equal(restored.fitMode, 'cover');
+
+                const restoredPhone = await registerDevice(server.url, 'screen-fill-phone');
+                clients.push(restoredPhone.socket);
+                assert.equal(restoredPhone.assignment.screenFillEnabled, true);
+                assert.equal(restoredPhone.assignment.fitMode, 'cover');
+                const restoredSecondPhone = await registerDevice(server.url, 'screen-fill-phone-two');
+                clients.push(restoredSecondPhone.socket);
+                assert.equal(restoredSecondPhone.assignment.fitMode, 'cover');
+            } finally {
+                for (const socket of clients) {
+                    socket.disconnect();
+                }
+                await server.close();
+                await rm(testDirectory, { recursive: true, force: true });
+            }
         });
         assert.equal(configResult.ok, true);
         assert.equal(configResult.totalScreens, 12);

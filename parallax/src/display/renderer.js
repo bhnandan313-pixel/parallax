@@ -1,7 +1,11 @@
 import {
+    ALIGNMENT_LIMITS,
+    FIT_MODES,
     calculateSourceRegion,
+    calculateWallTransform,
     createDefaultLayout,
     getScreenGeometry,
+    isValidAlignmentSettings,
     validateDisplayLayout
 } from './geometry.js';
 import {
@@ -28,6 +32,7 @@ export function createContentRenderer({
     scheduleTimeout = (callback, delay) => setTimeout(callback, delay),
     cancelTimeout = (handle) => clearTimeout(handle),
     onPlaybackStatus = () => {},
+    onAlignmentChange = () => {},
     now = () => Date.now(),
     getViewport = () => ({
         width: container.clientWidth || globalThis.innerWidth || 1000,
@@ -58,6 +63,8 @@ export function createContentRenderer({
     let calibrationEnabled = false;
     let calibrationOverlay = null;
     let activeAlignment = { horizontal: 0, vertical: 0, scale: 1 };
+    let screenFillEnabled = true;
+    let fitMode = 'cover';
     let layout = createDefaultLayout(totalScreens);
     let screenEnabled = true;
     let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
@@ -72,6 +79,8 @@ export function createContentRenderer({
     let lastDriftCheckAt = 0;
     let recoveryActive = false;
     let lastFallbackFrameAt = 0;
+    const activePointers = new Map();
+    let gestureStart = null;
     const canvas = createCanvas();
     canvas.id = 'panorama';
     canvas.setAttribute('aria-label', `Panorama screen ${activeScreen}`);
@@ -209,42 +218,59 @@ export function createContentRenderer({
             onStatus('Connection error: Canvas rendering is unavailable', 'error');
             return;
         }
-        const region = calculateSourceRegion(
-            layout,
-            activeScreen,
-            image.naturalWidth || image.videoWidth || image.width,
-            image.naturalHeight || image.videoHeight || image.height
-        );
-        const rotation = region.rotation * Math.PI / 180;
-        const rotatedAspect = region.rotation % 180 === 0
-            ? region.width / region.height
-            : region.height / region.width;
-        const canvasAspect = canvas.width / canvas.height;
-        const fitWidth = rotatedAspect > canvasAspect
-            ? canvas.width
-            : canvas.height * rotatedAspect;
-        const fitHeight = fitWidth / rotatedAspect;
-        const sourceWidth = region.rotation % 180 === 0 ? fitWidth : fitHeight;
-        const sourceHeight = region.rotation % 180 === 0 ? fitHeight : fitWidth;
+        const imageWidth = image.naturalWidth || image.videoWidth || image.width;
+        const imageHeight = image.naturalHeight || image.videoHeight || image.height;
         context.clearRect(0, 0, canvas.width, canvas.height);
         context.save();
-        context.translate(
-            canvas.width / 2 + activeAlignment.horizontal * dimensions.ratio,
-            canvas.height / 2 + activeAlignment.vertical * dimensions.ratio
-        );
-        context.rotate(rotation);
-        context.scale(activeAlignment.scale, activeAlignment.scale);
-        context.drawImage(
-            image,
-            region.x,
-            region.y,
-            region.width,
-            region.height,
-            -sourceWidth / 2,
-            -sourceHeight / 2,
-            sourceWidth,
-            sourceHeight
-        );
+        if (screenFillEnabled && fitMode !== 'manual') {
+            const geometry = getActiveGeometry();
+            const transform = calculateWallTransform(
+                layout,
+                activeScreen,
+                imageWidth,
+                imageHeight,
+                canvas.width,
+                canvas.height,
+                fitMode
+            );
+            context.rotate(geometry.rotation * Math.PI / 180);
+            context.translate(
+                -transform.screenX + transform.offsetX,
+                -transform.screenY + transform.offsetY
+            );
+            context.scale(transform.scaleX, transform.scaleY);
+            context.drawImage(image, 0, 0);
+        } else {
+            const region = calculateSourceRegion(layout, activeScreen, imageWidth, imageHeight);
+            const rotation = region.rotation * Math.PI / 180;
+            const rotatedAspect = region.rotation % 180 === 0
+                ? region.width / region.height
+                : region.height / region.width;
+            const canvasAspect = canvas.width / canvas.height;
+            const fitWidth = rotatedAspect > canvasAspect
+                ? canvas.width
+                : canvas.height * rotatedAspect;
+            const fitHeight = fitWidth / rotatedAspect;
+            const sourceWidth = region.rotation % 180 === 0 ? fitWidth : fitHeight;
+            const sourceHeight = region.rotation % 180 === 0 ? fitHeight : fitWidth;
+            context.translate(
+                canvas.width / 2 + activeAlignment.horizontal * dimensions.ratio,
+                canvas.height / 2 + activeAlignment.vertical * dimensions.ratio
+            );
+            context.rotate(rotation);
+            context.scale(activeAlignment.scale, activeAlignment.scale);
+            context.drawImage(
+                image,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                -sourceWidth / 2,
+                -sourceHeight / 2,
+                sourceWidth,
+                sourceHeight
+            );
+        }
         context.restore();
         canvas.setAttribute('aria-label', `Panorama screen ${activeScreen}`);
         ensureCalibrationOverlay();
@@ -256,6 +282,94 @@ export function createContentRenderer({
         }
         updateCalibrationPosition();
     }
+
+    function isManualMode() {
+        return !screenFillEnabled || fitMode === 'manual';
+    }
+
+    function getGestureMetrics() {
+        const points = [...activePointers.values()];
+        if (points.length < 2) {
+            return { distance: 0, midpoint: points[0] ?? null };
+        }
+        const [first, second] = points;
+        return {
+            distance: Math.hypot(second.x - first.x, second.y - first.y),
+            midpoint: {
+                x: (first.x + second.x) / 2,
+                y: (first.y + second.y) / 2
+            }
+        };
+    }
+
+    function resetGestureStart() {
+        gestureStart = {
+            ...getGestureMetrics(),
+            alignment: { ...activeAlignment }
+        };
+    }
+
+    function handlePointerDown(event) {
+        if (!isManualMode() || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+            return;
+        }
+        event.preventDefault();
+        activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        canvas.setPointerCapture?.(event.pointerId);
+        resetGestureStart();
+    }
+
+    function handlePointerMove(event) {
+        if (!activePointers.has(event.pointerId) || !gestureStart || !isManualMode()) {
+            return;
+        }
+        event.preventDefault();
+        activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        const metrics = getGestureMetrics();
+        const dx = metrics.midpoint && gestureStart.midpoint
+            ? metrics.midpoint.x - gestureStart.midpoint.x
+            : 0;
+        const dy = metrics.midpoint && gestureStart.midpoint
+            ? metrics.midpoint.y - gestureStart.midpoint.y
+            : 0;
+        const scale = metrics.distance > 0 && gestureStart.distance > 0
+            ? gestureStart.alignment.scale * metrics.distance / gestureStart.distance
+            : gestureStart.alignment.scale;
+        activeAlignment = {
+            horizontal: Math.min(ALIGNMENT_LIMITS.horizontal, Math.max(
+                -ALIGNMENT_LIMITS.horizontal,
+                gestureStart.alignment.horizontal + dx
+            )),
+            vertical: Math.min(ALIGNMENT_LIMITS.vertical, Math.max(
+                -ALIGNMENT_LIMITS.vertical,
+                gestureStart.alignment.vertical + dy
+            )),
+            scale: Math.min(ALIGNMENT_LIMITS.scaleMaximum, Math.max(
+                ALIGNMENT_LIMITS.scaleMinimum,
+                scale
+            ))
+        };
+        redraw();
+    }
+
+    function handlePointerEnd(event) {
+        if (!activePointers.has(event.pointerId)) {
+            return;
+        }
+        activePointers.delete(event.pointerId);
+        if (activePointers.size === 0) {
+            gestureStart = null;
+            onAlignmentChange({ ...activeAlignment });
+        } else {
+            resetGestureStart();
+        }
+    }
+
+    canvas.addEventListener?.('pointerdown', handlePointerDown);
+    canvas.addEventListener?.('pointermove', handlePointerMove);
+    canvas.addEventListener?.('pointerup', handlePointerEnd);
+    canvas.addEventListener?.('pointercancel', handlePointerEnd);
+    canvas.addEventListener?.('lostpointercapture', handlePointerEnd);
 
     function redraw() {
         const source = loadedVideo ?? loadedImage;
@@ -840,6 +954,13 @@ export function createContentRenderer({
     };
 
     render.dispose = () => {
+        canvas.removeEventListener?.('pointerdown', handlePointerDown);
+        canvas.removeEventListener?.('pointermove', handlePointerMove);
+        canvas.removeEventListener?.('pointerup', handlePointerEnd);
+        canvas.removeEventListener?.('pointercancel', handlePointerEnd);
+        canvas.removeEventListener?.('lostpointercapture', handlePointerEnd);
+        activePointers.clear();
+        gestureStart = null;
         stopVideoFrames();
         clearBufferingTimer();
         cancelContentTransition();
@@ -851,16 +972,7 @@ export function createContentRenderer({
     };
 
     render.setAlignment = (settings) => {
-        if (!settings
-            || !Number.isFinite(settings.horizontal)
-            || settings.horizontal < -50
-            || settings.horizontal > 50
-            || !Number.isFinite(settings.vertical)
-            || settings.vertical < -50
-            || settings.vertical > 50
-            || !Number.isFinite(settings.scale)
-            || settings.scale < 0.95
-            || settings.scale > 1.05) {
+        if (!isValidAlignmentSettings(settings)) {
             return false;
         }
         activeAlignment = {
@@ -868,6 +980,17 @@ export function createContentRenderer({
             vertical: settings.vertical,
             scale: settings.scale
         };
+        redraw();
+        return true;
+    };
+
+    render.setScreenFill = (settings) => {
+        if (!settings || typeof settings.enabled !== 'boolean'
+            || !FIT_MODES.includes(settings.fitMode)) {
+            return false;
+        }
+        screenFillEnabled = settings.enabled;
+        fitMode = settings.fitMode;
         redraw();
         return true;
     };

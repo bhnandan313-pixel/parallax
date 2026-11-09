@@ -1,7 +1,12 @@
 import { getOrCreateDeviceId } from './core/device.js';
 import { createParallaxSocket } from './core/socket.js';
 import { createContentRenderer } from './display/renderer.js';
-import { createDefaultLayout, validateDisplayLayout } from './display/geometry.js';
+import {
+    FIT_MODES,
+    createDefaultLayout,
+    isValidAlignmentSettings,
+    validateDisplayLayout
+} from './display/geometry.js';
 import { mountController } from './controller/controller.js';
 import {
     createAudioSettings,
@@ -715,10 +720,35 @@ function startDisplay() {
                     if (playbackStatusLabel) {
                         playbackStatusLabel.textContent = status;
                     }
+                },
+                onAlignmentChange: (settings) => {
+                    if (!socket?.connected || assignedScreen !== screen) {
+                        renderer?.setAlignment(alignmentByScreen[screen]);
+                        showStatus('Calibration could not be saved while disconnected.', 'error');
+                        return;
+                    }
+                    socket.timeout(5000).emit('device:alignment:set', { settings }, (error, result) => {
+                        if (error || !result?.ok) {
+                            renderer?.setAlignment(alignmentByScreen[screen]);
+                            showStatus(error
+                                ? 'Calibration save was not acknowledged.'
+                                : result?.message || 'Unable to save display calibration.', 'error');
+                            return;
+                        }
+                        alignmentByScreen[screen] = { ...result.settings };
+                        renderer?.setAlignment(result.settings);
+                        showStatus(`Screen ${screen} calibration saved.`);
+                    });
                 }
             });
             renderer.setScreenCount(totalScreens);
             renderer.setLayout(assignment.layout ?? createDefaultLayout(totalScreens));
+            renderer.setScreenFill({
+                enabled: assignment.screenFillEnabled !== false,
+                fitMode: FIT_MODES.includes(assignment.fitMode)
+                    ? assignment.fitMode
+                    : 'cover'
+            });
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
@@ -730,6 +760,12 @@ function startDisplay() {
             renderer.setScreenCount(totalScreens);
             renderer.setScreen(screen);
             renderer.setLayout(assignment.layout ?? createDefaultLayout(totalScreens));
+            renderer.setScreenFill({
+                enabled: assignment.screenFillEnabled !== false,
+                fitMode: FIT_MODES.includes(assignment.fitMode)
+                    ? assignment.fitMode
+                    : 'cover'
+            });
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
         }
@@ -859,6 +895,12 @@ function startDisplay() {
             try {
                 renderer.setScreenCount(totalScreens);
                 renderer.setLayout(nextLayout);
+                renderer.setScreenFill({
+                    enabled: configuration.screenFillEnabled !== false,
+                    fitMode: FIT_MODES.includes(configuration.fitMode)
+                        ? configuration.fitMode
+                        : 'cover'
+                });
                 const enabled = nextLayout.screens[assignedScreen]?.enabled === true;
                 renderer.setScreenEnabled(enabled);
                 if (!enabled) {
@@ -919,16 +961,7 @@ function startDisplay() {
             if (!Number.isInteger(screen) || screen < 1 || screen > 12) {
                 continue;
             }
-            if (settings
-                && Number.isFinite(settings.horizontal)
-                && settings.horizontal >= -50
-                && settings.horizontal <= 50
-                && Number.isFinite(settings.vertical)
-                && settings.vertical >= -50
-                && settings.vertical <= 50
-                && Number.isFinite(settings.scale)
-                && settings.scale >= 0.95
-                && settings.scale <= 1.05) {
+            if (isValidAlignmentSettings(settings)) {
                 alignmentByScreen[screen] = {
                     horizontal: settings.horizontal,
                     vertical: settings.vertical,

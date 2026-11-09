@@ -10,7 +10,9 @@ import sharp from 'sharp';
 import { fileTypeFromBuffer } from 'file-type';
 import { Server } from 'socket.io';
 import {
+    FIT_MODES,
     createDefaultLayout,
+    isValidAlignmentSettings,
     validateDisplayLayout
 } from '../src/display/geometry.js';
 import {
@@ -200,6 +202,7 @@ export function createParallaxServer({
     const alignmentSettings = createDefaultAlignmentSettings(MAX_SCREEN_COUNT);
     let calibrationPresets = [];
     let displayLayout = createDefaultLayout(MIN_SCREEN_COUNT);
+    let displaySettings = { screenFillEnabled: true, fitMode: 'cover' };
     let layoutPresets = [];
     let persistedAssignments = {};
     let persistedMarkerAssignments = {};
@@ -217,6 +220,7 @@ export function createParallaxServer({
             markerAssignments: { ...persistedMarkerAssignments },
             screens: getStoredAlignmentSnapshot(),
             layout: cloneDisplayLayout(displayLayout),
+            ...displaySettings,
             layoutPresets: layoutPresets.map((preset) => ({
                 name: preset.name,
                 totalScreens: preset.totalScreens,
@@ -431,6 +435,22 @@ export function createParallaxServer({
                 shouldRepair = true;
             }
             layoutPresets = validLayoutPresets;
+            const screenFillEnabled = settings.screenFillEnabled;
+            const fitMode = settings.fitMode;
+            if (typeof screenFillEnabled !== 'boolean') {
+                shouldRepair = true;
+            }
+            if (!FIT_MODES.includes(fitMode)) {
+                shouldRepair = true;
+            }
+            displaySettings = {
+                screenFillEnabled: typeof screenFillEnabled === 'boolean'
+                    ? screenFillEnabled
+                    : true,
+                fitMode: FIT_MODES.includes(fitMode)
+                    ? fitMode
+                    : 'cover'
+            };
             settings = {
                 calibrationEnabled: settings.calibrationEnabled,
                 totalScreens,
@@ -440,6 +460,7 @@ export function createParallaxServer({
                 screens: storedScreens,
                 presets: validPresets,
                 layout: cloneDisplayLayout(displayLayout),
+                ...displaySettings,
                 layoutPresets: layoutPresets.map((preset) => ({
                     name: preset.name,
                     totalScreens: preset.totalScreens,
@@ -469,6 +490,10 @@ export function createParallaxServer({
         }
         calibrationPresets = settings.presets ?? [];
         displayLayout = cloneDisplayLayout(settings.layout ?? createDefaultLayout(totalScreens));
+        displaySettings = {
+            screenFillEnabled: settings.screenFillEnabled ?? true,
+            fitMode: settings.fitMode ?? 'cover'
+        };
         layoutPresets = settings.layoutPresets ?? [];
         totalScreens = settings.totalScreens ?? MIN_SCREEN_COUNT;
         assignmentMode = settings.assignmentMode ?? 'automatic';
@@ -956,6 +981,10 @@ export function createParallaxServer({
                     }
                     calibrationPresets = previous.presets;
                     displayLayout = previous.layout;
+                    displaySettings = {
+                        screenFillEnabled: previous.screenFillEnabled,
+                        fitMode: previous.fitMode
+                    };
                     layoutPresets = previous.layoutPresets;
                     totalScreens = previous.totalScreens;
                     assignmentMode = previous.assignmentMode;
@@ -994,15 +1023,7 @@ export function createParallaxServer({
             return false;
         }
 
-        return Number.isFinite(settings.horizontal)
-            && settings.horizontal >= -50
-            && settings.horizontal <= 50
-            && Number.isFinite(settings.vertical)
-            && settings.vertical >= -50
-            && settings.vertical <= 50
-            && Number.isFinite(settings.scale)
-            && settings.scale >= 0.95
-            && settings.scale <= 1.05;
+        return isValidAlignmentSettings(settings);
     }
 
     function validateContent(content) {
@@ -1081,7 +1102,8 @@ export function createParallaxServer({
             totalScreens,
             assignmentMode,
             screens: getAlignmentSnapshot(),
-            layout: cloneDisplayLayout(displayLayout)
+            layout: cloneDisplayLayout(displayLayout),
+            ...displaySettings
         };
     }
 
@@ -1092,6 +1114,7 @@ export function createParallaxServer({
             markerId: persistedMarkerAssignments[device.id] ?? null,
             totalScreens,
             layout: cloneDisplayLayout(displayLayout),
+            ...displaySettings,
             enabled: device.screen === null ? false : displayLayout.screens[device.screen]?.enabled !== false,
             calibrationEnabled,
             alignment: device.screen ? { ...alignmentSettings[device.screen] } : null,
@@ -1126,7 +1149,8 @@ export function createParallaxServer({
         target.emit('layout:update', {
             totalScreens,
             layout: cloneDisplayLayout(displayLayout),
-            screens: getAlignmentSnapshot()
+            screens: getAlignmentSnapshot(),
+            ...displaySettings
         });
         target.emit('content:update', currentContent);
         target.emit('calibration:update', { enabled: calibrationEnabled });
@@ -1143,7 +1167,8 @@ export function createParallaxServer({
         io.emit('layout:update', {
             totalScreens,
             layout: cloneDisplayLayout(displayLayout),
-            screens: getAlignmentSnapshot()
+            screens: getAlignmentSnapshot(),
+            ...displaySettings
         });
         broadcastDeviceSnapshot();
         broadcastDiagnostics();
@@ -2531,6 +2556,35 @@ export function createParallaxServer({
             respond({ ok: true, ...getScreenConfigSnapshot() });
         });
 
+        socket.on('display-settings:set', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            if (!controllers.has(socket.id)) {
+                respond({ ok: false, message: 'Unauthorized display settings request' });
+                return;
+            }
+            if (!request || typeof request.screenFillEnabled !== 'boolean'
+                || !FIT_MODES.includes(request.fitMode)) {
+                respond({ ok: false, message: 'Invalid screen fill or fit mode settings.' });
+                return;
+            }
+
+            try {
+                await updateSettings(() => {
+                    displaySettings = {
+                        screenFillEnabled: request.screenFillEnabled,
+                        fitMode: request.fitMode
+                    };
+                });
+            } catch (error) {
+                console.error('Unable to persist display settings:', error);
+                respond({ ok: false, message: 'Unable to save display settings' });
+                return;
+            }
+
+            await broadcastScreenConfiguration();
+            respond({ ok: true, ...getScreenConfigSnapshot() });
+        });
+
         socket.on('layout:set', async (request, acknowledge) => {
             const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
             if (!controllers.has(socket.id)) {
@@ -3098,6 +3152,45 @@ export function createParallaxServer({
             });
         });
 
+        socket.on('device:alignment:set', async (request, acknowledge) => {
+            const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
+            const device = [...devices.values()].find(({ socketId }) => socketId === socket.id);
+            if (!device || device.screen === null) {
+                respond({ ok: false, message: 'Only an assigned display can update its own calibration.' });
+                return;
+            }
+            const state = { screen: device.screen, settings: request?.settings };
+            if (!validateAlignment(state)) {
+                respond({ ok: false, message: 'Invalid display calibration settings.' });
+                return;
+            }
+
+            try {
+                await updateSettings(() => {
+                    if (device.screen !== state.screen || state.screen > totalScreens) {
+                        throw new Error('ALIGNMENT_SCREEN_CHANGED');
+                    }
+                    alignmentSettings[state.screen] = { ...state.settings };
+                });
+            } catch (error) {
+                if (error.message === 'ALIGNMENT_SCREEN_CHANGED') {
+                    respond({ ok: false, message: 'Screen assignment changed. Reconnect and try again.' });
+                    return;
+                }
+                console.error('Unable to persist display calibration:', error);
+                respond({ ok: false, message: 'Unable to save display calibration.' });
+                return;
+            }
+
+            const screens = getAlignmentSnapshot();
+            broadcastAlignment(screens);
+            respond({
+                ok: true,
+                screen: state.screen,
+                settings: screens[state.screen]
+            });
+        });
+
         socket.on('preset:save', async (request, acknowledge) => {
             const respond = typeof acknowledge === 'function' ? acknowledge : () => {};
             if (!controllers.has(socket.id)) {
@@ -3372,6 +3465,8 @@ function createDefaultSettings() {
         screens: createDefaultAlignmentSettings(MAX_SCREEN_COUNT),
         presets: [],
         layout: createDefaultLayout(MIN_SCREEN_COUNT),
+        screenFillEnabled: true,
+        fitMode: 'cover',
         layoutPresets: []
     };
 }
@@ -3494,14 +3589,5 @@ function normalizeStoredPreset(preset) {
 }
 
 function validateStoredAlignment(settings) {
-    return settings && typeof settings === 'object' && !Array.isArray(settings)
-        && Number.isFinite(settings.horizontal)
-        && settings.horizontal >= -50
-        && settings.horizontal <= 50
-        && Number.isFinite(settings.vertical)
-        && settings.vertical >= -50
-        && settings.vertical <= 50
-        && Number.isFinite(settings.scale)
-        && settings.scale >= 0.95
-        && settings.scale <= 1.05;
+    return isValidAlignmentSettings(settings);
 }
