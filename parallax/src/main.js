@@ -609,7 +609,6 @@ function startDisplay() {
     let socket = null;
     let orientationReporter = null;
     let orientationReportingReady = false;
-    let sharedOrientationConfiguration = null;
     let identifyOverlay = null;
     let identifyTimer = null;
     let playbackDriftTimer = null;
@@ -920,7 +919,6 @@ function startDisplay() {
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setCalibration(calibrationEnabled);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
-            renderer.setSharedOrientation(sharedOrientationConfiguration);
             showPhoneControls();
             display.addEventListener('pointerdown', showPhoneControls, { passive: true });
             display.addEventListener('touchstart', showPhoneControls, { passive: true });
@@ -937,7 +935,6 @@ function startDisplay() {
             });
             renderer.setScreenEnabled(assignment.enabled !== false);
             renderer.setAlignment(alignmentByScreen[screen] ?? { horizontal: 0, vertical: 0, scale: 1 });
-            renderer.setSharedOrientation(sharedOrientationConfiguration);
         }
         syncDeviceAudio();
         reportDeviceStatus();
@@ -1118,15 +1115,6 @@ function startDisplay() {
     socket.on('adaptive-rendering:update', (configuration) => {
         renderer?.setAdaptiveRendering(configuration);
     });
-    socket.on('shared-orientation:current', (configuration) => {
-        sharedOrientationConfiguration = configuration;
-        renderer?.setSharedOrientation(configuration);
-    });
-    socket.on('shared-orientation:update', (configuration) => {
-        sharedOrientationConfiguration = configuration;
-        renderer?.setSharedOrientation(configuration);
-    });
-
     socket.on('content:update', (content) => {
         if (!renderer) {
             console.error('Received content before device assignment:', content);

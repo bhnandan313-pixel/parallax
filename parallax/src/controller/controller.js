@@ -814,6 +814,7 @@ export function mountController() {
     let surfaceCalibrationByDevice = {};
     let surfaceViewportCache = null;
     let surfaceCalibrationEditing = false;
+    let surfaceCalibrationOrientationAngle = null;
     let panoramaImageUrl = null;
     let panoramaMediaType = 'image';
     let displayLayout = createDefaultLayout(2);
@@ -1522,6 +1523,7 @@ export function mountController() {
 
     surfaceDeviceSelect?.addEventListener('change', () => {
         surfaceCalibrationEditing = false;
+        surfaceCalibrationOrientationAngle = null;
         if (surfaceEditor) {
             surfaceEditor.hidden = true;
         }
@@ -1534,6 +1536,9 @@ export function mountController() {
             console.error('Received invalid screen-corner calibration capture:', capture);
             return;
         }
+        surfaceCalibrationOrientationAngle = [0, 90, 180, 270].includes(capture.orientationAngle)
+            ? capture.orientationAngle
+            : null;
         surfaceDeviceSelect.value = capture.deviceId;
         surfaceCalibrationEditing = true;
         surfaceEditor.hidden = false;
@@ -1551,6 +1556,7 @@ export function mountController() {
         surfaceStatus.classList.remove('is-error');
     });
     surfaceStartButton?.addEventListener('click', () => {
+        surfaceCalibrationOrientationAngle = null;
         const calibration = surfaceCalibrationByDevice[surfaceDeviceSelect.value];
         surfaceCalibrationEditing = true;
         surfaceEditor.hidden = false;
@@ -1594,7 +1600,8 @@ export function mountController() {
         socket.timeout(5000).emit('screen-surface:calibration:save', {
             deviceId: surfaceDeviceSelect.value,
             corners: calibration.corners.map(({ x, y }) => ({ x, y })),
-            confidence: calibration.confidence
+            confidence: calibration.confidence,
+            orientationAngle: surfaceCalibrationOrientationAngle
         }, (error, response) => {
             if (error || !response?.ok) {
                 surfaceSaveButton.disabled = false;
@@ -3006,24 +3013,34 @@ export function mountController() {
         if (!surfaceViewports) {
             return;
         }
-        const displays = registeredDevices
-            .filter((device) => Number.isInteger(device.screen) && device.screen !== null)
-            .sort((left, right) => left.screen - right.screen)
-            .slice(0, 2);
-        const calibrations = displays.map((device) => surfaceCalibrationByDevice[device.id])
-            .filter(Boolean);
-        surfaceViewportCache = calculateScreenSurfaceViewports(calibrations);
         surfaceViewports.replaceChildren();
-        if (!surfaceViewportCache.valid) {
-            surfaceViewports.textContent = `UNKNOWN · ${surfaceViewportCache.reason
-                .replaceAll('-', ' ')}.`;
+        const configuration = adaptiveRenderingConfiguration;
+        const mapping = surfaceViewportCache
+            ?? calculateScreenSurfaceViewports(registeredDevices
+                .filter((device) => Number.isInteger(device.screen) && device.screen !== null)
+                .sort((left, right) => left.screen - right.screen)
+                .slice(0, 2)
+                .map((device) => surfaceCalibrationByDevice[device.id])
+                .filter(Boolean));
+        if (!mapping) {
+            surfaceViewports.textContent = 'Waiting for server viewport status.';
+            return;
+        }
+        if (!mapping.valid) {
+            const reason = mapping.reason || configuration?.reason || 'viewport-unavailable';
+            surfaceViewports.textContent = `FALLBACK · ${reason.replaceAll('-', ' ')}.`;
             return;
         }
         const heading = document.createElement('strong');
-        heading.textContent = `Camera-relative viewport frame · ${surfaceViewportCache.arrangement}`
-            + ` · ${Math.round(surfaceViewportCache.confidence * 100)}% manual confidence`;
+        const status = configuration?.active ? 'Active' : 'Fallback';
+        const fallbackReason = configuration?.active || !configuration?.reason
+            ? ''
+            : ` · ${configuration.reason.replaceAll('-', ' ')}`;
+        heading.textContent = `${status} camera-relative viewport frame · ${mapping.arrangement}`
+            + ` · ${Math.round(mapping.confidence * 100)}% manual confidence`
+            + ` · config v${configuration?.version ?? '—'}${fallbackReason}`;
         surfaceViewports.append(heading);
-        for (const viewport of surfaceViewportCache.viewports) {
+        for (const viewport of mapping.viewports) {
             const row = document.createElement('span');
             row.textContent = `${viewport.deviceId} · center (${viewport.center.x.toFixed(3)}, ${viewport.center.y.toFixed(3)})`
                 + ` · size ${viewport.width.toFixed(3)} × ${viewport.height.toFixed(3)} normalized`
@@ -3984,6 +4001,10 @@ export function mountController() {
             : {};
         renderSurfaceCalibrationUI();
     });
+    socket.on('screen-surface:viewports:current', (mapping) => {
+        surfaceViewportCache = mapping;
+        renderSurfaceViewports();
+    });
     socket.on('vision:camera:status', (event) => {
         if (!event?.connected) {
             visionObservationCache = visionObservationCache.map((observation) => ({
@@ -4046,11 +4067,15 @@ export function mountController() {
     socket.on('screen-config:update', applyScreenConfiguration);
     socket.on('adaptive-rendering:current', (configuration) => {
         adaptiveRenderingConfiguration = configuration;
+        surfaceViewportCache = configuration?.viewportMapping ?? surfaceViewportCache;
         renderAdaptiveRenderingStatus();
+        renderSurfaceViewports();
     });
     socket.on('adaptive-rendering:update', (configuration) => {
         adaptiveRenderingConfiguration = configuration;
+        surfaceViewportCache = configuration?.viewportMapping ?? surfaceViewportCache;
         renderAdaptiveRenderingStatus();
+        renderSurfaceViewports();
     });
     socket.on('shared-orientation:current', (configuration) => {
         sharedOrientationConfiguration = configuration;

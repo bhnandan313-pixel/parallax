@@ -1,9 +1,11 @@
 export const SCREEN_SURFACE_CALIBRATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const MIN_SCREEN_SURFACE_CONFIDENCE = 0.5;
+export const SCREEN_SURFACE_OBSERVATION_MAX_AGE_MS = 2000;
 
 const CORNER_NAMES = Object.freeze(['topLeft', 'topRight', 'bottomRight', 'bottomLeft']);
 const MIN_EDGE_LENGTH = 0.005;
 const MIN_QUAD_AREA = 0.0001;
+const MAX_CENTER_OFFSET_MARKER_WIDTHS = 0.75;
 
 function normalizeAngle(angle) {
     const fullRotation = Math.PI * 2;
@@ -96,7 +98,8 @@ export function createScreenSurfaceCalibration({
     deviceId,
     corners,
     confidence = 0.75,
-    timestamp = Date.now()
+    timestamp = Date.now(),
+    orientationAngle = null
 } = {}) {
     if (typeof deviceId !== 'string' || !deviceId.trim() || deviceId.length > 128) {
         return null;
@@ -106,7 +109,8 @@ export function createScreenSurfaceCalibration({
     const calibratedAt = Number(timestamp);
     if (!geometry.valid || !Number.isFinite(certainty)
         || certainty < MIN_SCREEN_SURFACE_CONFIDENCE || certainty > 1
-        || !Number.isFinite(calibratedAt) || calibratedAt <= 0) {
+        || !Number.isFinite(calibratedAt) || calibratedAt <= 0
+        || (orientationAngle !== null && ![0, 90, 180, 270].includes(orientationAngle))) {
         return null;
     }
     const surface = deriveSurface(geometry.corners);
@@ -121,6 +125,7 @@ export function createScreenSurfaceCalibration({
         ...surface,
         confidence: round(certainty),
         timestamp: calibratedAt,
+        orientationAngle,
         method: 'manual-four-corner-confirmation',
         physicalGeometryCalibrated: false
     };
@@ -137,10 +142,59 @@ export function validateScreenSurfaceCalibration(calibration) {
         || Number(calibration.confidence) < MIN_SCREEN_SURFACE_CONFIDENCE
         || Number(calibration.confidence) > 1
         || !Number.isFinite(Number(calibration.timestamp))
-        || Number(calibration.timestamp) <= 0) {
+        || Number(calibration.timestamp) <= 0
+        || (calibration.orientationAngle !== undefined
+            && calibration.orientationAngle !== null
+            && ![0, 90, 180, 270].includes(calibration.orientationAngle))) {
         return false;
     }
     return validateCornerGeometry(corners).valid;
+}
+
+export function validateScreenSurfaceObservations(calibrations, observations, {
+    timestamp = Date.now(),
+    maxAgeMs = SCREEN_SURFACE_OBSERVATION_MAX_AGE_MS,
+    maxCenterOffsetMarkerWidths = MAX_CENTER_OFFSET_MARKER_WIDTHS
+} = {}) {
+    const now = Number(timestamp);
+    if (!Number.isFinite(now) || !Array.isArray(calibrations) || calibrations.length !== 2) {
+        return { valid: false, reason: 'exactly-two-screen-calibrations-required' };
+    }
+    if (!Array.isArray(observations)
+        || !Number.isFinite(Number(maxAgeMs)) || Number(maxAgeMs) < 0
+        || !Number.isFinite(Number(maxCenterOffsetMarkerWidths))
+        || Number(maxCenterOffsetMarkerWidths) <= 0) {
+        return { valid: false, reason: 'invalid-screen-observation-validation-options' };
+    }
+    const observationsByDevice = new Map(observations
+        .filter((observation) => typeof observation?.deviceId === 'string')
+        .map((observation) => [observation.deviceId, observation]));
+    for (const calibration of calibrations) {
+        const observed = observationsByDevice.get(calibration?.deviceId);
+        const receivedAt = Number(observed?.receivedAt);
+        if (!observed || observed.isVisible === false
+            || !Number.isFinite(receivedAt) || now - receivedAt < 0
+            || now - receivedAt > Number(maxAgeMs)) {
+            return { valid: false, reason: 'missing-or-stale-live-marker-observation' };
+        }
+        const centerX = Number(observed.centerX ?? observed.normalizedCenter?.x);
+        const centerY = Number(observed.centerY ?? observed.normalizedCenter?.y);
+        const markerWidth = Number(observed.width);
+        const markerHeight = Number(observed.height);
+        if (![centerX, centerY, markerWidth, markerHeight, Number(observed.confidence)]
+            .every(Number.isFinite)
+            || markerWidth <= 0 || markerHeight <= 0 || Number(observed.confidence) <= 0) {
+            return { valid: false, reason: 'invalid-live-marker-observation' };
+        }
+        const offsetInMarkerWidths = Math.hypot(
+            (centerX - calibration.center.x) / markerWidth,
+            (centerY - calibration.center.y) / markerHeight
+        );
+        if (offsetInMarkerWidths > Number(maxCenterOffsetMarkerWidths)) {
+            return { valid: false, reason: 'screen-position-changed-recalibrate' };
+        }
+    }
+    return { valid: true, reason: null };
 }
 
 function invalidViewports(reason, timestamp) {
@@ -202,10 +256,67 @@ function classifyArrangement(first, second) {
     return 'UNKNOWN';
 }
 
+function multiplyMatrices(left, right) {
+    return Array.from({ length: 3 }, (_, row) =>
+        Array.from({ length: 3 }, (_, column) =>
+            left[row * 3] * right[column]
+            + left[row * 3 + 1] * right[column + 3]
+            + left[row * 3 + 2] * right[column + 6]
+        ).map(round)
+    ).flat();
+}
+
+function projectPoint(matrix, u, v) {
+    const denominator = matrix[6] * u + matrix[7] * v + matrix[8];
+    if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-8) {
+        return null;
+    }
+    return {
+        x: round((matrix[0] * u + matrix[1] * v + matrix[2]) / denominator),
+        y: round((matrix[3] * u + matrix[4] * v + matrix[5]) / denominator)
+    };
+}
+
+function getLocalRotationMatrix(calibration, currentAngle) {
+    if (![0, 90, 180, 270].includes(calibration.orientationAngle)
+        || ![0, 90, 180, 270].includes(currentAngle)) {
+        return null;
+    }
+    const turns = ((currentAngle - calibration.orientationAngle + 360) % 360) / 90;
+    if (turns === 1) {
+        return [0, 1, 0, -1, 0, 1, 0, 0, 1];
+    }
+    if (turns === 2) {
+        return [-1, 0, 1, 0, -1, 1, 0, 0, 1];
+    }
+    if (turns === 3) {
+        return [0, -1, 1, 1, 0, 0, 0, 0, 1];
+    }
+    return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+}
+
+function getSharedFrameRotation(sharedOrientation, aspectRatio) {
+    if (sharedOrientation === null) {
+        return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    }
+    if (!['landscape', 'portrait'].includes(sharedOrientation)) {
+        return null;
+    }
+    if (sharedOrientation === 'portrait' && aspectRatio > 1) {
+        return [0, 1, 0, -1, 0, 1, 0, 0, 1];
+    }
+    if (sharedOrientation === 'landscape' && aspectRatio < 1) {
+        return [0, -1, 1, 1, 0, 0, 0, 0, 1];
+    }
+    return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+}
+
 export function calculateScreenSurfaceViewports(calibrations, {
     timestamp = Date.now(),
     maxAgeMs = SCREEN_SURFACE_CALIBRATION_MAX_AGE_MS,
-    minConfidence = MIN_SCREEN_SURFACE_CONFIDENCE
+    minConfidence = MIN_SCREEN_SURFACE_CONFIDENCE,
+    orientationAngles = null,
+    sharedOrientation = null
 } = {}) {
     const now = Number(timestamp);
     if (!Number.isFinite(now) || !Array.isArray(calibrations) || calibrations.length !== 2) {
@@ -225,7 +336,8 @@ export function calculateScreenSurfaceViewports(calibrations, {
             deviceId: calibration?.deviceId,
             corners: calibration?.corners,
             confidence: calibration?.confidence,
-            timestamp: calibration?.timestamp
+            timestamp: calibration?.timestamp,
+            orientationAngle: calibration?.orientationAngle ?? null
         });
         if (!normalized || byId.has(normalized.deviceId)) {
             return invalidViewports('invalid-or-duplicate-calibration', now);
@@ -241,10 +353,6 @@ export function calculateScreenSurfaceViewports(calibrations, {
     }
     const ordered = [...byId.values()].sort((left, right) =>
         left.deviceId.localeCompare(right.deviceId));
-    const arrangement = classifyArrangement(ordered[0], ordered[1]);
-    if (arrangement === 'UNKNOWN') {
-        return invalidViewports('ambiguous-device-arrangement', now);
-    }
     const points = ordered.flatMap((calibration) => calibration.corners.map(({ x, y }) => ({ x, y })));
     const minX = Math.min(...points.map(({ x }) => x));
     const maxX = Math.max(...points.map(({ x }) => x));
@@ -255,26 +363,54 @@ export function calculateScreenSurfaceViewports(calibrations, {
     if (frameWidth < MIN_EDGE_LENGTH || frameHeight < MIN_EDGE_LENGTH) {
         return invalidViewports('degenerate-shared-frame', now);
     }
+    const baseAspectRatio = frameWidth / frameHeight;
+    const sharedRotation = getSharedFrameRotation(sharedOrientation, baseAspectRatio);
+    if (!sharedRotation) {
+        return invalidViewports('invalid-shared-orientation', now);
+    }
     const viewports = ordered.map((calibration) => {
         const normalizedCorners = calibration.corners.map(({ x, y }) => ({
             x: round((x - minX) / frameWidth),
             y: round((y - minY) / frameHeight)
         }));
-        const homography = solveUnitSquareHomography(normalizedCorners);
-        if (!homography) {
+        const baseHomography = solveUnitSquareHomography(normalizedCorners);
+        const currentAngle = orientationAngles instanceof Map
+            ? orientationAngles?.get(calibration.deviceId)
+            : orientationAngles?.[calibration.deviceId];
+        const localRotation = orientationAngles === null
+            ? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+            : getLocalRotationMatrix(calibration, currentAngle);
+        if (!baseHomography || !localRotation) {
             return null;
         }
+        const homography = multiplyMatrices(
+            sharedRotation,
+            multiplyMatrices(baseHomography, localRotation)
+        );
+        const transformedCorners = [[0, 0], [1, 0], [1, 1], [0, 1]]
+            .map(([u, v]) => projectPoint(homography, u, v));
+        const transformedCenter = projectPoint(homography, 0.5, 0.5);
+        if (transformedCorners.some((point) => !point) || !transformedCenter) {
+            return null;
+        }
+        const left = Math.min(...transformedCorners.map(({ x }) => x));
+        const right = Math.max(...transformedCorners.map(({ x }) => x));
+        const top = Math.min(...transformedCorners.map(({ y }) => y));
+        const bottom = Math.max(...transformedCorners.map(({ y }) => y));
+        const deltaAngle = orientationAngles === null
+            ? 0
+            : ((currentAngle - calibration.orientationAngle + 540) % 360) - 180;
+        const quarterTurn = Math.abs(deltaAngle) === 90 || Math.abs(deltaAngle) === 270;
         return {
             deviceId: calibration.deviceId,
-            corners: normalizedCorners,
-            center: {
-                x: round((calibration.center.x - minX) / frameWidth),
-                y: round((calibration.center.y - minY) / frameHeight)
-            },
-            width: round(calibration.width / frameWidth),
-            height: round(calibration.height / frameHeight),
-            rotation: calibration.rotation,
-            aspectRatio: round(calibration.width / calibration.height),
+            corners: transformedCorners,
+            center: transformedCenter,
+            width: round(right - left),
+            height: round(bottom - top),
+            rotation: round(normalizeAngle(calibration.rotation + deltaAngle * Math.PI / 180)),
+            aspectRatio: round(quarterTurn
+                ? calibration.height / calibration.width
+                : calibration.width / calibration.height),
             confidence: calibration.confidence,
             timestamp: calibration.timestamp,
             localToSharedFrame: {
@@ -284,22 +420,31 @@ export function calculateScreenSurfaceViewports(calibrations, {
         };
     });
     if (viewports.some((viewport) => !viewport)) {
-        return invalidViewports('degenerate-viewport-transform', now);
+        return invalidViewports(orientationAngles === null
+            ? 'degenerate-viewport-transform'
+            : 'orientation-recalibration-required', now);
     }
+    const arrangement = classifyArrangement(viewports[0], viewports[1]);
+    if (arrangement === 'UNKNOWN') {
+        return invalidViewports('ambiguous-device-arrangement', now);
+    }
+    const swapFrameDimensions = sharedRotation[0] === 0;
+    const sharedFrameWidth = swapFrameDimensions ? frameHeight : frameWidth;
+    const sharedFrameHeight = swapFrameDimensions ? frameWidth : frameHeight;
     return {
         valid: true,
         reason: null,
         timestamp: now,
         confidence: round(Math.min(...ordered.map(({ confidence }) => confidence))),
         arrangement,
-        reversedFromDeviceIdOrder: ordered[1].center.x < ordered[0].center.x,
+        reversedFromDeviceIdOrder: viewports[1].center.x < viewports[0].center.x,
         coordinateSpace: 'normalized-camera-image-reference',
         physicalGeometryCalibrated: false,
         sharedFrame: {
             x: round(minX),
             y: round(minY),
-            width: round(frameWidth),
-            height: round(frameHeight),
+            width: round(sharedFrameWidth),
+            height: round(sharedFrameHeight),
             units: 'normalized-camera-image'
         },
         viewports

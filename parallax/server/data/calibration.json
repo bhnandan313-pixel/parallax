@@ -1,5 +1,5 @@
 {
-  "calibrationEnabled": true,
+  "calibrationEnabled": false,
   "totalScreens": 2,
   "assignmentMode": "automatic",
   "assignments": {
@@ -30,8 +30,12 @@
     "10145ddc-11f6-489d-b24e-c1424e04f467": null,
     "0796ee73-ec47-4584-b5b5-3b07fb447869": null,
     "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": null,
-    "af377bac-fa4c-48d4-a07f-92882d39d132": 1,
-    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": 2
+    "af377bac-fa4c-48d4-a07f-92882d39d132": null,
+    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": null,
+    "0488f0c9-a739-4541-8cdb-cad4a7ced703": null,
+    "e16f7b03-ed79-408a-aab7-160fdf896490": null,
+    "734f77b0-4a8d-4972-9ab2-c9f2d8388352": 1,
+    "13e42fdd-670e-45f6-b609-06233cff2cbd": 2
   },
   "markerAssignments": {
     "60f643f1-3382-40bb-8bda-52ba5f0bbc07": 463,
@@ -62,18 +66,108 @@
     "0796ee73-ec47-4584-b5b5-3b07fb447869": 23,
     "e85fc7a8-aeab-49a6-ac2c-e184fd6e9bed": 343,
     "af377bac-fa4c-48d4-a07f-92882d39d132": 574,
-    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": 147
+    "6d7d6bb3-3039-488d-acdd-36ce8eb24444": 147,
+    "0488f0c9-a739-4541-8cdb-cad4a7ced703": 731,
+    "e16f7b03-ed79-408a-aab7-160fdf896490": 271,
+    "734f77b0-4a8d-4972-9ab2-c9f2d8388352": 494,
+    "13e42fdd-670e-45f6-b609-06233cff2cbd": 87
+  },
+  "surfaceCalibrations": {
+    "0488f0c9-a739-4541-8cdb-cad4a7ced703": {
+      "deviceId": "0488f0c9-a739-4541-8cdb-cad4a7ced703",
+      "coordinateSpace": "normalized-camera-image-manually-confirmed",
+      "corners": [
+        {
+          "name": "topLeft",
+          "x": 0.898432,
+          "y": 0.314125
+        },
+        {
+          "name": "topRight",
+          "x": 0.201448,
+          "y": 0.339703
+        },
+        {
+          "name": "bottomRight",
+          "x": 0.176538,
+          "y": 0.740651
+        },
+        {
+          "name": "bottomLeft",
+          "x": 0.886098,
+          "y": 0.734256
+        }
+      ],
+      "width": 0.703521,
+      "height": 0.411017,
+      "center": {
+        "x": 0.540629,
+        "y": 0.532184
+      },
+      "position": {
+        "x": 0.540629,
+        "y": 0.532184
+      },
+      "rotation": 3.118746,
+      "confidence": 0.75,
+      "timestamp": 1794286721739,
+      "orientationAngle": null,
+      "method": "manual-four-corner-confirmation",
+      "physicalGeometryCalibrated": false
+    },
+    "734f77b0-4a8d-4972-9ab2-c9f2d8388352": {
+      "deviceId": "734f77b0-4a8d-4972-9ab2-c9f2d8388352",
+      "coordinateSpace": "normalized-camera-image-manually-confirmed",
+      "corners": [
+        {
+          "name": "topLeft",
+          "x": 0.107372,
+          "y": 0.169094
+        },
+        {
+          "name": "topRight",
+          "x": 0.870137,
+          "y": 0.172223
+        },
+        {
+          "name": "bottomRight",
+          "x": 0.87183,
+          "y": 0.644461
+        },
+        {
+          "name": "bottomLeft",
+          "x": 0.116804,
+          "y": 0.660379
+        }
+      ],
+      "width": 0.758983,
+      "height": 0.481808,
+      "center": {
+        "x": 0.491536,
+        "y": 0.411539
+      },
+      "position": {
+        "x": 0.491536,
+        "y": 0.411539
+      },
+      "rotation": -0.008489,
+      "confidence": 0.75,
+      "timestamp": 1794293352308,
+      "orientationAngle": 0,
+      "method": "manual-four-corner-confirmation",
+      "physicalGeometryCalibrated": false
+    }
   },
   "screens": {
     "1": {
-      "horizontal": 280.4018020629883,
-      "vertical": -2.2981414794921875,
-      "scale": 0.8136446198433108
+      "horizontal": -68.78601455688477,
+      "vertical": 7.50810432434082,
+      "scale": 2.1242472319028747
     },
     "2": {
-      "horizontal": 249.5833396911621,
-      "vertical": 47.458425998687744,
-      "scale": 1.1309551112274596
+      "horizontal": 57.938838958740234,
+      "vertical": 40.525022983551025,
+      "scale": 2.126970805418438
     },
     "3": {
       "horizontal": -23,
@@ -135,20 +229,22 @@
         "row": 0,
         "column": 0,
         "rotation": 0,
-        "orientation": "landscape",
+        "orientation": "auto",
         "enabled": true
       },
       "2": {
         "row": 0,
         "column": 1,
         "rotation": 0,
-        "orientation": "landscape",
+        "orientation": "auto",
         "enabled": true
       }
     }
   },
   "screenFillEnabled": true,
   "fitMode": "cover",
+  "adaptiveRenderingEnabled": true,
+  "orientationMode": "AUTO",
   "layoutPresets": [],
   "presets": []
 }

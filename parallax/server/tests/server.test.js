@@ -947,6 +947,57 @@ test('broadcasts shared adaptive viewports and falls back on disconnect before r
             fitMode: 'cover',
             adaptiveRenderingEnabled: true
         })).adaptiveRenderingEnabled, true);
+        for (const [phone, deviceId] of [
+            [firstPhone.socket, 'adaptive-phone-one'],
+            [secondPhone.socket, 'adaptive-phone-two']
+        ]) {
+            const reported = await emitAck(phone, 'device:orientation', {
+                deviceId,
+                orientation: 'portrait',
+                angle: 0,
+                source: 'screen-orientation-api',
+                timestamp: Date.now()
+            });
+            assert.equal(reported.ok, true);
+        }
+
+        const visionSession = await emitAck(controller, 'vision:camera:create', null);
+        assert.equal(visionSession.ok, true);
+        const camera = await connectClient(server.url);
+        clients.push(camera);
+        assert.equal((await emitAck(camera, 'vision:camera:join', {
+            token: visionSession.token
+        })).ok, true);
+        const reportMarkerPositions = async (positions = {}) => {
+            const markers = [
+                ['adaptive-phone-one', 0.7],
+                ['adaptive-phone-two', 0.3]
+            ].map(([deviceId, defaultCenterX]) => {
+                const centerX = positions[deviceId] ?? defaultCenterX;
+                const halfWidth = 0.02;
+                const halfHeight = 0.015;
+                return {
+                    id: computeMarkerIdForDevice(deviceId),
+                    x: centerX,
+                    y: 0.5,
+                    centerX,
+                    centerY: 0.5,
+                    width: halfWidth * 2,
+                    height: halfHeight * 2,
+                    corners: [
+                        { x: centerX - halfWidth, y: 0.5 - halfHeight },
+                        { x: centerX + halfWidth, y: 0.5 - halfHeight },
+                        { x: centerX + halfWidth, y: 0.5 + halfHeight },
+                        { x: centerX - halfWidth, y: 0.5 + halfHeight }
+                    ],
+                    rotation: 0,
+                    confidence: 0.9,
+                    visible: true
+                };
+            });
+            return emitAck(camera, 'vision:camera:report', { markers });
+        };
+        assert.equal((await reportMarkerPositions()).ok, true);
 
         const calibrations = [
             {
@@ -988,6 +1039,7 @@ test('broadcasts shared adaptive viewports and falls back on disconnect before r
         const active = activeUpdate[0];
         assert.equal(active.active, true);
         assert.equal(active.arrangement, 'SIDE_BY_SIDE');
+        assert.equal(active.viewportMapping.valid, true);
         assert.equal(active.physicalGeometryCalibrated, false);
         assert.ok(active.version > initial.version);
         assert.deepEqual(active.devices.map(({ deviceId, screen }) => ({
@@ -998,17 +1050,115 @@ test('broadcasts shared adaptive viewports and falls back on disconnect before r
             { deviceId: 'adaptive-phone-two', screen: 2 }
         ]);
         assert.deepEqual(activeUpdate[0], activeUpdate[1]);
-        const unchangedConfigurationUpdate = nextMatchingEvent(
-            controller,
-            'adaptive-rendering:update',
-            (configuration) => configuration.active
-        );
+        const persistedCalibrations = JSON.parse(await readFile(server.calibrationFile, 'utf8'))
+            .surfaceCalibrations;
+        assert.equal(persistedCalibrations['adaptive-phone-one'].orientationAngle, 0);
+        assert.equal(persistedCalibrations['adaptive-phone-two'].orientationAngle, 0);
+        const portraitUpdates = [
+            nextMatchingEvent(firstPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'portrait'),
+            nextMatchingEvent(secondPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'portrait')
+        ];
         await emitAck(controller, 'display-settings:set', {
             screenFillEnabled: true,
             fitMode: 'cover',
-            adaptiveRenderingEnabled: true
+            adaptiveRenderingEnabled: true,
+            orientationMode: 'PORTRAIT'
         });
-        assert.equal((await unchangedConfigurationUpdate).version, active.version);
+        const portraitConfigurations = await Promise.all(portraitUpdates);
+        assert.deepEqual(portraitConfigurations[0], portraitConfigurations[1]);
+        assert.ok(portraitConfigurations[0].version > active.version);
+        assert.equal(portraitConfigurations[0].arrangement, 'STACKED');
+        assert.ok(portraitConfigurations[0].sharedFrame.height
+            > portraitConfigurations[0].sharedFrame.width);
+
+        const sensorRotationUpdates = [
+            nextMatchingEvent(firstPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'portrait'
+                    && configuration.devices.every(({ rotation }) =>
+                        Math.abs(rotation - Math.PI / 2) < 1e-5)),
+            nextMatchingEvent(secondPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'portrait'
+                    && configuration.devices.every(({ rotation }) =>
+                        Math.abs(rotation - Math.PI / 2) < 1e-5))
+        ];
+        for (const [phone, deviceId] of [
+            [firstPhone.socket, 'adaptive-phone-one'],
+            [secondPhone.socket, 'adaptive-phone-two']
+        ]) {
+            const reported = await emitAck(phone, 'device:orientation', {
+                deviceId,
+                orientation: 'landscape',
+                angle: 90,
+                source: 'screen-orientation-api',
+                timestamp: Date.now()
+            });
+            assert.equal(reported.ok, true);
+        }
+        const rotationConfigurations = await Promise.all(sensorRotationUpdates);
+        assert.deepEqual(rotationConfigurations[0], rotationConfigurations[1]);
+        assert.ok(rotationConfigurations[0].version > portraitConfigurations[0].version);
+
+        const landscapeUpdates = [
+            nextMatchingEvent(firstPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'landscape'),
+            nextMatchingEvent(secondPhone.socket, 'adaptive-rendering:update',
+                (configuration) => configuration.active
+                    && configuration.sharedOrientation === 'landscape')
+        ];
+        await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            adaptiveRenderingEnabled: true,
+            orientationMode: 'LANDSCAPE'
+        });
+        const landscapeConfigurations = await Promise.all(landscapeUpdates);
+        assert.deepEqual(landscapeConfigurations[0], landscapeConfigurations[1]);
+        assert.ok(landscapeConfigurations[0].version > rotationConfigurations[0].version);
+        assert.equal(landscapeConfigurations[0].arrangement, 'SIDE_BY_SIDE');
+        assert.ok(landscapeConfigurations[0].sharedFrame.width
+            > landscapeConfigurations[0].sharedFrame.height);
+
+        const movedFallbackUpdate = nextMatchingEvent(
+            firstPhone.socket,
+            'adaptive-rendering:update',
+            (configuration) => !configuration.active
+                && configuration.reason === 'screen-position-changed-recalibrate'
+        );
+        assert.equal((await reportMarkerPositions({
+            'adaptive-phone-one': 0.76
+        })).ok, true);
+        const movedFallback = await movedFallbackUpdate;
+        assert.equal(movedFallback.viewportMapping.reason,
+            'screen-position-changed-recalibrate');
+        assert.equal(movedFallback.devices.length, 0);
+
+        const restoredAfterMovementUpdate = nextMatchingEvent(
+            firstPhone.socket,
+            'adaptive-rendering:update',
+            (configuration) => configuration.active
+        );
+        assert.equal((await reportMarkerPositions()).ok, true);
+        const restoredAfterRecalibration = await restoredAfterMovementUpdate;
+        assert.equal(restoredAfterRecalibration.active, true);
+        assert.deepEqual(restoredAfterRecalibration.devices.map(({ deviceId }) => deviceId), [
+            'adaptive-phone-one',
+            'adaptive-phone-two'
+        ]);
+
+        const unchangedSettings = await emitAck(controller, 'display-settings:set', {
+            screenFillEnabled: true,
+            fitMode: 'cover',
+            adaptiveRenderingEnabled: true,
+            orientationMode: 'LANDSCAPE'
+        });
+        assert.equal(unchangedSettings.adaptiveRenderingEnabled, true);
 
         const fallbackUpdate = nextMatchingEvent(
             firstPhone.socket,
@@ -1018,7 +1168,7 @@ test('broadcasts shared adaptive viewports and falls back on disconnect before r
         );
         secondPhone.socket.disconnect();
         const fallback = await fallbackUpdate;
-        assert.ok(fallback.version > active.version);
+        assert.ok(fallback.version > landscapeConfigurations[0].version);
 
         const reconnected = await connectClient(server.url);
         clients.push(reconnected);

@@ -13,7 +13,9 @@ export default defineConfig({
             'concerns-walking-junction-thursday.trycloudflare.com',
             'diego-imports-pointing-discussions.trycloudflare.com',
             'eric-nearest-robin-cute.trycloudflare.com',
-            'mighty-mapping-roulette-bookmarks.trycloudflare.com'
+            'mighty-mapping-roulette-bookmarks.trycloudflare.com',
+            'motor-bunch-leaf-accommodation.trycloudflare.com',
+            'compilation-antibodies-wesley-store.trycloudflare.com'
         ],
         proxy: {
             '/api': {

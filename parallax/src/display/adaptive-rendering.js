@@ -38,13 +38,16 @@ export function createAdaptiveRenderingConfiguration({
     screenFillEnabled = true,
     fitMode = 'cover',
     layout = null,
+    sharedOrientation = null,
     version = 1
 } = {}) {
     const connectedDevices = Array.isArray(devices) ? devices : [];
     const validViewportSet = viewports?.valid === true
         && Array.isArray(viewports.viewports)
         && viewports.viewports.length === 2
-        && viewports.viewports.every(isValidViewport);
+        && viewports.viewports.every(isValidViewport)
+        && (sharedOrientation === null
+            || ['landscape', 'portrait'].includes(sharedOrientation));
     const devicesByScreen = new Map(connectedDevices.map((device) => [device.screen, device]));
     const hasBothDevices = [1, 2].every((screen) => {
         const device = devicesByScreen.get(screen);
@@ -77,6 +80,10 @@ export function createAdaptiveRenderingConfiguration({
     const relativeRotation = validViewportSet
         ? normalizeAngle(viewports.viewports[1].rotation - viewports.viewports[0].rotation)
         : null;
+    const viewportMapping = viewports ? { ...viewports } : null;
+    if (viewportMapping) {
+        delete viewportMapping.timestamp;
+    }
     return {
         active,
         enabled: enabled === true,
@@ -95,17 +102,22 @@ export function createAdaptiveRenderingConfiguration({
             ? viewports.coordinateSpace
             : 'unavailable',
         physicalGeometryCalibrated: false,
+        viewportMapping,
+        sharedOrientation,
         fitMode: FIT_MODES.includes(fitMode) ? fitMode : 'cover',
         screenFillEnabled: screenFillEnabled === true,
-        sharedFrame: validViewportSet ? {
-            ...viewports.sharedFrame,
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-            aspectRatio: viewports.sharedFrame.width / viewports.sharedFrame.height,
-            units: 'shared-video-frame-normalized'
-        } : null,
+        sharedFrame: validViewportSet ? (() => {
+            const aspectRatio = viewports.sharedFrame.width / viewports.sharedFrame.height;
+            return {
+                ...viewports.sharedFrame,
+                x: 0,
+                y: 0,
+                width: aspectRatio >= 1 ? 1 : aspectRatio,
+                height: aspectRatio >= 1 ? 1 / aspectRatio : 1,
+                aspectRatio,
+                units: 'shared-video-frame-normalized'
+            };
+        })() : null,
         devices: validViewportSet
             ? viewports.viewports.map((viewport) => ({
                 ...viewport,
@@ -167,7 +179,6 @@ export function createAdaptiveRenderTriangles({
     imageHeight,
     sharedFrame,
     fitMode = 'cover',
-    sharedOrientation = null,
     segments = DEFAULT_MESH_SEGMENTS
 } = {}) {
     if (!isValidViewport(viewport)
@@ -176,8 +187,6 @@ export function createAdaptiveRenderTriangles({
         || !Number.isFinite(sharedFrame?.width) || sharedFrame.width <= 0
         || !Number.isFinite(sharedFrame?.height) || sharedFrame.height <= 0
         || !['cover', 'contain', 'stretch'].includes(fitMode)
-        || (sharedOrientation !== null
-            && !['landscape', 'portrait'].includes(sharedOrientation))
         || !Number.isInteger(segments) || segments < 1 || segments > 32) {
         return null;
     }
@@ -187,12 +196,6 @@ export function createAdaptiveRenderTriangles({
     if (!Number.isFinite(sharedAspect) || sharedAspect <= 0) {
         return null;
     }
-    const shouldRotateSharedFrame = sharedOrientation === 'portrait'
-        ? sharedAspect > 1
-        : sharedOrientation === 'landscape' && sharedAspect < 1;
-    if (shouldRotateSharedFrame) {
-        sharedAspect = 1 / sharedAspect;
-    }
     const vertices = Array.from({ length: segments + 1 }, (_, row) =>
         Array.from({ length: segments + 1 }, (_, column) => {
             const u = column / segments;
@@ -201,13 +204,8 @@ export function createAdaptiveRenderTriangles({
             if (!projectedPoint) {
                 return null;
             }
-            const sharedPoint = shouldRotateSharedFrame
-                ? sharedOrientation === 'portrait'
-                    ? { x: projectedPoint.y, y: 1 - projectedPoint.x }
-                    : { x: 1 - projectedPoint.y, y: projectedPoint.x }
-                : projectedPoint;
             const sourcePoint = mapSharedPointToSource(
-                sharedPoint,
+                projectedPoint,
                 imageWidth,
                 imageHeight,
                 fitMode,

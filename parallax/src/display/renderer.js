@@ -67,7 +67,6 @@ export function createContentRenderer({
     let screenFillEnabled = true;
     let fitMode = 'cover';
     let adaptiveRendering = null;
-    let sharedOrientation = null;
     let layout = createDefaultLayout(totalScreens);
     let screenEnabled = true;
     let audioSettings = { ...DEFAULT_AUDIO_SETTINGS };
@@ -300,11 +299,7 @@ export function createContentRenderer({
             imageWidth,
             imageHeight,
             sharedFrame: adaptiveRendering.sharedFrame,
-            fitMode,
-            sharedOrientation: sharedOrientation?.renderingActive === true
-                && ['landscape', 'portrait'].includes(sharedOrientation.orientation)
-                ? sharedOrientation.orientation
-                : null
+            fitMode
         });
         if (!triangles) {
             return false;
@@ -1116,21 +1111,6 @@ export function createContentRenderer({
             return false;
         }
         adaptiveRendering = configuration;
-        redraw();
-        return true;
-    };
-
-    render.setSharedOrientation = (configuration) => {
-        if (!configuration || typeof configuration !== 'object'
-            || !Number.isInteger(configuration.version)
-            || !['AUTO', 'LANDSCAPE', 'PORTRAIT', 'MANUAL'].includes(configuration.mode)
-            || (configuration.orientation !== null
-                && !['landscape', 'portrait'].includes(configuration.orientation))) {
-            sharedOrientation = null;
-            redraw();
-            return false;
-        }
-        sharedOrientation = configuration;
         redraw();
         return true;
     };

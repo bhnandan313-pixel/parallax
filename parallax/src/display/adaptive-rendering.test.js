@@ -54,7 +54,7 @@ test('creates one authoritative shared-frame configuration for reversed device o
         { deviceId: 'phone-right', screen: 1 }
     ]);
     assert.equal(configuration.sharedFrame.width, 1);
-    assert.equal(configuration.sharedFrame.height, 1);
+    assert.ok(configuration.sharedFrame.height < 1);
     assert.ok(Math.abs(configuration.sharedFrame.aspectRatio - 4 / 3) < 1e-10);
     assert.ok(configuration.devices.every(({ localToSharedFrame }) =>
         localToSharedFrame.convention.includes('shared=')));
@@ -122,40 +122,114 @@ test('maps adjacent devices to matching global video coordinates', () => {
     }
 });
 
-test('applies one shared portrait or landscape frame rotation without breaking the device seam', () => {
-    const configuration = createConfiguration();
-    const viewports = [1, 2].map((screen) =>
-        configuration.devices.find((entry) => entry.screen === screen));
-    const mapFor = (viewport, sharedOrientation) => createAdaptiveRenderTriangles({
-        viewport,
+test('renders both rotated viewports from one transformed frame with a continuous seam', () => {
+    const first = createScreenSurfaceCalibration({
+        deviceId: 'phone-right',
+        corners: [
+            { x: 0.5, y: 0.2 }, { x: 0.9, y: 0.2 },
+            { x: 0.9, y: 0.8 }, { x: 0.5, y: 0.8 }
+        ],
+        confidence: 0.9,
+        timestamp: 1000,
+        orientationAngle: 0
+    });
+    const second = createScreenSurfaceCalibration({
+        deviceId: 'phone-left',
+        corners: [
+            { x: 0.1, y: 0.2 }, { x: 0.5, y: 0.2 },
+            { x: 0.5, y: 0.8 }, { x: 0.1, y: 0.8 }
+        ],
+        confidence: 0.9,
+        timestamp: 1000,
+        orientationAngle: 0
+    });
+    const mapping = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1100,
+        orientationAngles: { 'phone-left': 90, 'phone-right': 90 },
+        sharedOrientation: 'portrait'
+    });
+    const configuration = createAdaptiveRenderingConfiguration({
+        viewports: mapping,
+        devices: [
+            { deviceId: 'phone-right', screen: 1, connected: true },
+            { deviceId: 'phone-left', screen: 2, connected: true }
+        ],
+        enabled: true,
+        fitMode: 'stretch',
+        sharedOrientation: 'portrait',
+        version: 8
+    });
+    const meshFor = (deviceId) => createAdaptiveRenderTriangles({
+        viewport: configuration.devices.find((viewport) =>
+            viewport.deviceId === deviceId),
         canvasWidth: 800,
         canvasHeight: 600,
         imageWidth: 1200,
         imageHeight: 600,
         sharedFrame: configuration.sharedFrame,
-        fitMode: 'stretch',
-        sharedOrientation
+        fitMode: 'stretch'
     });
-    const landscape = viewports.map((viewport) => mapFor(viewport, 'landscape'));
-    const portrait = viewports.map((viewport) => mapFor(viewport, 'portrait'));
-    assert.ok(landscape.flat(2).some(({ source }) => source.x !== 0 || source.y !== 0));
-    assert.notDeepEqual(portrait[0][0][0].source, landscape[0][0][0].source);
+    const leftMesh = meshFor('phone-left');
+    const rightMesh = meshFor('phone-right');
+    const leftSeam = leftMesh.flat(2)
+        .filter(({ destination }) => Math.abs(destination.y - 600) < 1e-8)
+        .map(({ source }) => source);
+    const rightSeam = rightMesh.flat(2)
+        .filter(({ destination }) => Math.abs(destination.y) < 1e-8)
+        .map(({ source }) => source);
 
-    for (const mesh of [landscape, portrait]) {
-        const leftScreen = mesh.find((_, index) => viewports[index].screen === 2);
-        const rightScreen = mesh.find((_, index) => viewports[index].screen === 1);
-        const leftEdge = leftScreen.flat(2)
-            .filter(({ destination }) => Math.abs(destination.x - 800) < 1e-8)
-            .map(({ source }) => source);
-        const rightEdge = rightScreen.flat(2)
-            .filter(({ destination }) => Math.abs(destination.x) < 1e-8)
-            .map(({ source }) => source);
-        for (const point of leftEdge) {
-            assert.ok(rightEdge.some((rightPoint) =>
-                Math.abs(point.x - rightPoint.x) < 1e-8
-                && Math.abs(point.y - rightPoint.y) < 1e-8));
-        }
+    assert.equal(configuration.active, true);
+    assert.equal(configuration.sharedOrientation, 'portrait');
+    assert.equal(configuration.version, 8);
+    assert.equal(configuration.arrangement, 'STACKED');
+    for (const point of leftSeam) {
+        assert.ok(rightSeam.some((rightPoint) =>
+            Math.abs(point.x - rightPoint.x) < 1e-8
+            && Math.abs(point.y - rightPoint.y) < 1e-8));
     }
+});
+
+test('manual rendering configuration keeps the original untransformed viewports', () => {
+    const configuration = createConfiguration();
+    const manual = createAdaptiveRenderingConfiguration({
+        viewports: calculateScreenSurfaceViewports([
+            calibration('phone-right', 0.5, 0.9),
+            calibration('phone-left', 0.1, 0.5)
+        ], { timestamp: 1100 }),
+        devices: [
+            { deviceId: 'phone-right', screen: 1, connected: true },
+            { deviceId: 'phone-left', screen: 2, connected: true }
+        ],
+        enabled: true,
+        sharedOrientation: null
+    });
+    assert.equal(manual.active, true);
+    assert.equal(manual.sharedOrientation, null);
+    assert.deepEqual(manual.devices.map(({ localToSharedFrame }) => localToSharedFrame),
+        configuration.devices.map(({ localToSharedFrame }) => localToSharedFrame));
+});
+
+test('falls back instead of rotating a calibration without its captured orientation baseline', () => {
+    const invalidMapping = calculateScreenSurfaceViewports([
+        calibration('phone-right', 0.5, 0.9),
+        calibration('phone-left', 0.1, 0.5)
+    ], {
+        timestamp: 1100,
+        orientationAngles: { 'phone-left': 90, 'phone-right': 90 },
+        sharedOrientation: 'portrait'
+    });
+    const configuration = createAdaptiveRenderingConfiguration({
+        viewports: invalidMapping,
+        devices: [
+            { deviceId: 'phone-right', screen: 1, connected: true },
+            { deviceId: 'phone-left', screen: 2, connected: true }
+        ],
+        enabled: true,
+        sharedOrientation: 'portrait'
+    });
+
+    assert.equal(configuration.active, false);
+    assert.equal(configuration.reason, 'orientation-recalibration-required');
 });
 
 test('supports stacked and angled projective viewports and all existing automatic fit modes', () => {

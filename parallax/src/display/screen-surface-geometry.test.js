@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     calculateScreenSurfaceViewports,
-    createScreenSurfaceCalibration
+    createScreenSurfaceCalibration,
+    validateScreenSurfaceObservations
 } from './screen-surface-geometry.js';
 
 function calibration(deviceId, corners, options = {}) {
@@ -10,7 +11,8 @@ function calibration(deviceId, corners, options = {}) {
         deviceId,
         corners,
         confidence: options.confidence ?? 0.9,
-        timestamp: options.timestamp ?? 1000
+        timestamp: options.timestamp ?? 1000,
+        orientationAngle: options.orientationAngle ?? null
     });
 }
 
@@ -138,4 +140,152 @@ test('reports confidence from the least certain surface and preserves edge conti
     assert.equal(mapping.viewports[0].corners[1].x, mapping.viewports[1].corners[0].x);
     assert.equal(mapping.viewports[0].corners[2].x, mapping.viewports[1].corners[3].x);
     assert.equal(mapping.physicalGeometryCalibrated, false);
+});
+
+test('recalculates the same shared frame for landscape-to-portrait and portrait-to-landscape changes', () => {
+    const first = calibration('phone-a', rectangle(0.1, 0.2, 0.5, 0.8), {
+        orientationAngle: 0
+    });
+    const second = calibration('phone-b', rectangle(0.5, 0.2, 0.9, 0.8), {
+        orientationAngle: 0
+    });
+    const original = calculateScreenSurfaceViewports([first, second], { timestamp: 1100 });
+    const portrait = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1200,
+        orientationAngles: new Map([['phone-a', 90], ['phone-b', 90]]),
+        sharedOrientation: 'portrait'
+    });
+    const landscape = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1300,
+        orientationAngles: new Map([['phone-a', 0], ['phone-b', 0]]),
+        sharedOrientation: 'landscape'
+    });
+
+    assert.equal(original.arrangement, 'SIDE_BY_SIDE');
+    assert.equal(portrait.valid, true);
+    assert.equal(portrait.arrangement, 'STACKED');
+    assert.ok(portrait.sharedFrame.height > portrait.sharedFrame.width);
+    assert.equal(landscape.valid, true);
+    assert.equal(landscape.arrangement, 'SIDE_BY_SIDE');
+    assert.ok(landscape.sharedFrame.width > landscape.sharedFrame.height);
+    assert.notDeepEqual(
+        portrait.viewports.map(({ localToSharedFrame }) => localToSharedFrame),
+        original.viewports.map(({ localToSharedFrame }) => localToSharedFrame)
+    );
+});
+
+test('orientation-adjusted viewports retain identity and the exact shared boundary', () => {
+    const left = calibration('phone-left', rectangle(0.1, 0.2, 0.5, 0.8), {
+        orientationAngle: 0
+    });
+    const right = calibration('phone-right', rectangle(0.5, 0.2, 0.9, 0.8), {
+        orientationAngle: 0
+    });
+    const mapping = calculateScreenSurfaceViewports([right, left], {
+        timestamp: 1100,
+        orientationAngles: {
+            'phone-left': 90,
+            'phone-right': 90
+        },
+        sharedOrientation: 'portrait'
+    });
+
+    assert.equal(mapping.valid, true);
+    assert.deepEqual(mapping.viewports.map(({ deviceId }) => deviceId), [
+        'phone-left',
+        'phone-right'
+    ]);
+    const leftEdge = mapping.viewports[0].corners
+        .filter(({ y }) => Math.abs(y - 0.5) < 1e-6);
+    const rightEdge = mapping.viewports[1].corners
+        .filter(({ y }) => Math.abs(y - 0.5) < 1e-6);
+    assert.equal(leftEdge.length, 2);
+    const sortByX = (points) => points.sort((first, second) => first.x - second.x);
+    assert.deepEqual(sortByX(leftEdge), sortByX(rightEdge));
+});
+
+test('requires a saved orientation baseline rather than guessing rotated geometry', () => {
+    const first = calibration('phone-a', rectangle(0.1, 0.2, 0.5, 0.8));
+    const second = calibration('phone-b', rectangle(0.5, 0.2, 0.9, 0.8), {
+        orientationAngle: 0
+    });
+    const mapping = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1100,
+        orientationAngles: { 'phone-a': 90, 'phone-b': 90 },
+        sharedOrientation: 'portrait'
+    });
+    assert.equal(mapping.valid, false);
+    assert.equal(mapping.reason, 'orientation-recalibration-required');
+});
+
+test('preserves projective angled surfaces while applying the shared orientation frame', () => {
+    const angled = calibration('phone-a', [
+        { x: 0.15, y: 0.05 },
+        { x: 0.48, y: 0.25 },
+        { x: 0.45, y: 0.85 },
+        { x: 0.12, y: 0.65 }
+    ], { orientationAngle: 0 });
+    const lower = calibration('phone-b', rectangle(0.15, 0.55, 0.7, 0.95), {
+        orientationAngle: 0
+    });
+    const mapping = calculateScreenSurfaceViewports([angled, lower], {
+        timestamp: 1100,
+        orientationAngles: { 'phone-a': 0, 'phone-b': 0 },
+        sharedOrientation: 'portrait'
+    });
+    assert.equal(mapping.valid, true);
+    assert.equal(mapping.arrangement, 'STACKED');
+    assert.ok(mapping.viewports[0].localToSharedFrame.matrix3x3.some((value, index) =>
+        index === 1 && Math.abs(value) > 0.01));
+});
+
+test('requires fresh independent marker observations that agree with calibrated screen centers', () => {
+    const first = calibration('phone-a', rectangle(0.1, 0.2, 0.4, 0.8));
+    const second = calibration('phone-b', rectangle(0.4, 0.2, 0.8, 0.8));
+    const observations = [
+        {
+            deviceId: 'phone-a', centerX: 0.25, centerY: 0.5,
+            width: 0.04, height: 0.03, confidence: 0.9, receivedAt: 1100
+        },
+        {
+            deviceId: 'phone-b', centerX: 0.6, centerY: 0.5,
+            width: 0.04, height: 0.03, confidence: 0.9, receivedAt: 1100
+        }
+    ];
+
+    assert.deepEqual(validateScreenSurfaceObservations([first, second], observations, {
+        timestamp: 1200
+    }), { valid: true, reason: null });
+    assert.equal(validateScreenSurfaceObservations([first, second], observations.slice(0, 1), {
+        timestamp: 1200
+    }).reason, 'missing-or-stale-live-marker-observation');
+    assert.equal(validateScreenSurfaceObservations([first, second], observations, {
+        timestamp: 4000
+    }).reason, 'missing-or-stale-live-marker-observation');
+    assert.equal(validateScreenSurfaceObservations([first, {
+        ...second,
+        deviceId: 'phone-c'
+    }], observations, { timestamp: 1200 }).reason,
+    'missing-or-stale-live-marker-observation');
+});
+
+test('rejects moved markers independently without changing saved calibration', () => {
+    const first = calibration('phone-a', rectangle(0.1, 0.2, 0.4, 0.8));
+    const second = calibration('phone-b', rectangle(0.4, 0.2, 0.8, 0.8));
+    const movedObservations = [
+        {
+            deviceId: 'phone-a', centerX: 0.25, centerY: 0.5,
+            width: 0.04, height: 0.03, confidence: 0.9, receivedAt: 1100
+        },
+        {
+            deviceId: 'phone-b', centerX: 0.7, centerY: 0.5,
+            width: 0.04, height: 0.03, confidence: 0.9, receivedAt: 1100
+        }
+    ];
+
+    assert.equal(validateScreenSurfaceObservations([first, second], movedObservations, {
+        timestamp: 1200
+    }).reason, 'screen-position-changed-recalibrate');
+    assert.deepEqual(first.center, { x: 0.25, y: 0.5 });
+    assert.deepEqual(second.center, { x: 0.6, y: 0.5 });
 });

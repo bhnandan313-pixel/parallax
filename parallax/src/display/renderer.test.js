@@ -471,7 +471,8 @@ test('adaptive viewport updates redraw the same synchronized video without resta
             { x: 0.9, y: 0.8 }, { x: 0.5, y: 0.8 }
         ],
         confidence: 0.9,
-        timestamp: 1000
+        timestamp: 1000,
+        orientationAngle: 0
     });
     const second = createScreenSurfaceCalibration({
         deviceId: 'phone-left',
@@ -480,9 +481,14 @@ test('adaptive viewport updates redraw the same synchronized video without resta
             { x: 0.5, y: 0.8 }, { x: 0.1, y: 0.8 }
         ],
         confidence: 0.9,
-        timestamp: 1000
+        timestamp: 1000,
+        orientationAngle: 0
     });
-    const mapping = calculateScreenSurfaceViewports([first, second], { timestamp: 1100 });
+    const mapping = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1100,
+        orientationAngles: { 'phone-right': 0, 'phone-left': 0 },
+        sharedOrientation: 'landscape'
+    });
     const configuration = createAdaptiveRenderingConfiguration({
         viewports: mapping,
         devices: [
@@ -491,6 +497,7 @@ test('adaptive viewport updates redraw the same synchronized video without resta
         ],
         enabled: true,
         fitMode: 'cover',
+        sharedOrientation: 'landscape',
         version: 3
     });
     const playCalls = video.playCalls;
@@ -502,19 +509,24 @@ test('adaptive viewport updates redraw the same synchronized video without resta
     assert.ok(drawCalls(canvas).length > drawCount);
     assert.ok(canvas.calls.some(([name]) => name === 'clip'));
     assert.ok(canvas.calls.some(([name]) => name === 'setTransform'));
-    assert.equal(render.setSharedOrientation({
-        version: 1,
-        mode: 'AUTO',
-        orientation: 'landscape',
-        renderingActive: true
-    }), true);
     const landscapeTransform = canvas.calls.filter(([name]) => name === 'setTransform').at(-1);
-    assert.equal(render.setSharedOrientation({
-        version: 2,
-        mode: 'AUTO',
-        orientation: 'portrait',
-        renderingActive: true
-    }), true);
+    const portraitMapping = calculateScreenSurfaceViewports([first, second], {
+        timestamp: 1200,
+        orientationAngles: { 'phone-right': 90, 'phone-left': 90 },
+        sharedOrientation: 'portrait'
+    });
+    const portraitConfiguration = createAdaptiveRenderingConfiguration({
+        viewports: portraitMapping,
+        devices: [
+            { deviceId: 'phone-right', screen: 1, connected: true },
+            { deviceId: 'phone-left', screen: 2, connected: true }
+        ],
+        enabled: true,
+        fitMode: 'cover',
+        sharedOrientation: 'portrait',
+        version: 4
+    });
+    assert.equal(render.setAdaptiveRendering(portraitConfiguration), true);
     const portraitTransform = canvas.calls.filter(([name]) => name === 'setTransform').at(-1);
     assert.notDeepEqual(portraitTransform, landscapeTransform);
     assert.equal(videos.length, 1);
